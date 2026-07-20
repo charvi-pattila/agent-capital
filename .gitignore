@@ -1,0 +1,13 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+backend/server.log
+
+# User data — chat histories, memory, uploads (personal, not source)
+data/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+.DS_Store
