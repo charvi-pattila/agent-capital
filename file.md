@@ -114,3 +114,18 @@ Bonus roadmap items done: **Delete project** (🗑 on card hover, hidden while r
 - Global memory (shared across all projects)
 - Auth for remote access (phone browser)
 - Native Terminal.app window image-paste behavior — still unverified
+
+---
+
+## 2026-07-20 session — Chat tab scroll, fixed for real
+
+User reported "scroll doesn't work" repeatedly; took several rounds to find the actual cause(s) rather than guessing. In order:
+1. **Modal overflow bug (real, fixed).** `.modal`/`.modal-overlay` (App.css) had no `max-height`/`overflow-y`, so on a short browser window a modal's bottom (Create/Cancel buttons) rendered off-screen with zero way to reach it. Fixed with `max-height: calc(100vh - 48px); overflow-y: auto` on `.modal` and `overflow-y: auto` on `.modal-overlay`.
+2. **Chat.jsx live-pin bug (real, fixed).** `handleScroll` referenced an undeclared `atBottomRef`, and the `pauseLive()`/`resumeLive()` mechanism (described in the component's own comments) was never wired to any event, so the terminal snapped to the bottom on every SSE tick while Claude was generating — impossible to read scrollback while it was actively working. Fixed by having `handleScroll` call `pauseLive()`/`resumeLive()` based on distance from bottom.
+3. **The actual root cause.** Claude Code's CLI runs inside tmux's *alternate screen buffer* (confirmed via `tmux display -p '#{alternate_on} history=#{history_size}'` → `1` / `0` on real sessions) — meaning tmux keeps **zero scrollback**, and `start_session` never set an explicit pane size, so tmux defaulted to a small ~23-row pane. The mirrored `.terminal-body` almost never had more than 23 lines to show, so there was rarely anything to scroll into, and the box looked mostly empty.
+4. **Real fix.** `start_session` now creates tmux sessions at `-x 120 -y 200` and locks that size with `tmux set-option -w window-size manual` (so the native Terminal.app window attaching later — a smaller client — doesn't shrink it back down). Claude Code's TUI renders scrollback to fill whatever pane it's given, so this alone makes the mirror capture ~200 lines instead of ~23 — enough to genuinely overflow `.terminal-body` and get a **real native browser scrollbar**, filling the box properly. `Chat.jsx`'s wheel handler was simplified to a boundary trigger: normal wheel scroll is left alone (pure native scrolling, smooth, no jank); only when the user hits `scrollTop <= 0` and keeps scrolling up does it POST to the new `POST /api/projects/<pid>/scroll` endpoint (`{direction, count}`), which runs `tmux send-keys ... PageUp/PageDown` so Claude's own TUI pages back further (it says as much in its own UI: "scroll with PgUp/PgDn").
+5. Already-running sessions don't get the bigger pane automatically (only new `start_session` calls do) — apply live via `tmux set-option -t claude_<pid> -w window-size manual && tmux resize-window -t claude_<pid> -x 120 -y 200` (safe, non-destructive, same as resizing any terminal).
+
+All of it verified against a real, disposable `claude --dangerously-skip-permissions` session in a scratch directory (never the user's actual project sessions) — confirmed PageUp/PageDown genuinely scroll the CLI's transcript, confirmed the manual window-size survives a simulated smaller-client attach, and confirmed via headless Chrome that ordinary scrolling now fires zero API calls while the boundary fallback fires only when actually stuck at the top.
+
+**Also:** repo had never been committed — initialized git, added a root `.gitignore` (excludes `venv/`, `data/` (personal chat histories/memory — not source), `.claude/settings.local.json`, pycache/logs), and made the initial commit.
