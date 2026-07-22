@@ -149,7 +149,13 @@ def start_session(pid, project_path=None):
     if not os.path.isdir(cwd):
         os.makedirs(cwd, exist_ok=True)
     cmd = f"cd {cwd} && {CLAUDE_BIN} --dangerously-skip-permissions"
-    subprocess.Popen([TMUX, "new-session", "-d", "-s", session, "-x", "120", "-y", "200", cmd])
+    # `-d` detaches the pane's own command immediately, so this still returns as soon as
+    # the session exists — it must be a blocking run(), not Popen(). Popen() only forks
+    # tmux's client and returns before the client has even connected, so on a cold tmux
+    # server (no session ever started before) the set-option/resize-window calls below
+    # would race the server's startup and fail silently against a socket that doesn't
+    # exist yet, leaving the window at whatever a later, smaller client resizes it to.
+    subprocess.run([TMUX, "new-session", "-d", "-s", session, "-x", "120", "-y", "200", cmd])
     # Claude Code's TUI sizes its rendered history to the pane it's given, so a tall
     # pane means more scrollback fits in one capture — that's what lets the web mirror
     # scroll natively instead of relying on PageUp for everything. "manual" keeps this
