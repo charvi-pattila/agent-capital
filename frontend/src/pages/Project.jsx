@@ -82,6 +82,8 @@ export default function Project() {
             projectId={id}
             previewUrl={project.preview_url}
             previewFile={project.preview_file}
+            serverCmd={project.server_cmd}
+            serverRunning={project.server_running}
             onSaved={load}
           />
         )}

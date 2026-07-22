@@ -126,9 +126,42 @@ def session_name(pid):
     return f"claude_{pid}"
 
 
-def session_running(pid):
-    r = subprocess.run([TMUX, "has-session", "-t", session_name(pid)], capture_output=True)
+def server_session_name(pid):
+    return f"claude_server_{pid}"
+
+
+def _tmux_has_session(name):
+    r = subprocess.run([TMUX, "has-session", "-t", name], capture_output=True)
     return r.returncode == 0
+
+
+def session_running(pid):
+    return _tmux_has_session(session_name(pid))
+
+
+def dev_server_running(pid):
+    return _tmux_has_session(server_session_name(pid))
+
+
+def start_dev_server(pid, project_path, cmd):
+    """Run the project's own dev/app server (e.g. `npm run dev`) in its own tmux
+    session, detached from the Claude session, so the Preview tab's URL is already
+    live by the time a Start finishes. No-ops if no command is configured or one's
+    already running."""
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return False
+    session = server_session_name(pid)
+    if _tmux_has_session(session):
+        return False
+    cwd = os.path.expanduser(project_path) if project_path else os.path.expanduser("~")
+    subprocess.run([TMUX, "new-session", "-d", "-s", session, "-c", cwd, cmd])
+    return True
+
+
+def stop_dev_server(pid):
+    if _tmux_has_session(server_session_name(pid)):
+        subprocess.run([TMUX, "kill-session", "-t", server_session_name(pid)])
 
 
 def capture_pane(pid):
@@ -202,6 +235,7 @@ def close_terminal_window(pid):
 def kill_session(pid):
     if session_running(pid):
         subprocess.run([TMUX, "kill-session", "-t", session_name(pid)])
+    stop_dev_server(pid)
     close_terminal_window(pid)
     ready = Path(f"/tmp/phone_ready_{pid}")
     if ready.exists():
@@ -510,6 +544,7 @@ def _resume_project(pid, meta):
     else:
         if start_session(pid, meta.get("path")):
             open_terminal_window(pid)
+        start_dev_server(pid, meta.get("path"), meta.get("server_cmd"))
         threading.Event().wait(3)
         context = build_context_prompt(pid)
         prompt = (context + "\n\n" if context else "") + \
@@ -698,6 +733,7 @@ def list_projects():
     projects = all_projects()
     for p in projects:
         p["status"] = "running" if session_running(p["id"]) else "stopped"
+        p["server_running"] = dev_server_running(p["id"])
         mem = get_memory(p["id"])
         p["last_session_summary"] = mem["memory"].get("last_session", "")[:80]
     return jsonify(projects)
@@ -715,6 +751,7 @@ def create_project():
         "emoji": data.get("emoji", "🚀"),
         "path": resolve_project_path(data.get("path", ""), name),
         "preview_url": data.get("preview_url", ""),
+        "server_cmd": data.get("server_cmd", ""),
         "created": datetime.now().isoformat(),
         "status": "stopped",
     }
@@ -724,19 +761,21 @@ def create_project():
 
     first = data.get("first_message", "").strip()
     if first:
-        threading.Thread(target=_auto_start_and_message, args=(pid, first, meta["path"]), daemon=True).start()
+        threading.Thread(target=_auto_start_and_message, args=(pid, first, meta["path"], meta["server_cmd"]), daemon=True).start()
     elif data.get("auto_start"):
         def _start_only():
             if start_session(pid, meta["path"]):
                 open_terminal_window(pid)
+            start_dev_server(pid, meta["path"], meta["server_cmd"])
         threading.Thread(target=_start_only, daemon=True).start()
 
     return jsonify(meta)
 
 
-def _auto_start_and_message(pid, message, path):
+def _auto_start_and_message(pid, message, path, server_cmd=""):
     if start_session(pid, path):
         open_terminal_window(pid)
+    start_dev_server(pid, path, server_cmd)
     threading.Event().wait(3)
     _do_send_message(pid, message)
 
@@ -747,6 +786,7 @@ def get_project(pid):
     if not meta:
         return jsonify({"error": "Not found"}), 404
     meta["status"] = "running" if session_running(pid) else "stopped"
+    meta["server_running"] = dev_server_running(pid)
     return jsonify(meta)
 
 
@@ -756,7 +796,7 @@ def update_project(pid):
     if not meta:
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
-    for field in ("preview_url", "preview_file"):
+    for field in ("preview_url", "preview_file", "server_cmd"):
         if field in data:
             meta[field] = data[field]
     save_meta(pid, meta)
@@ -780,6 +820,7 @@ def start_project(pid):
     def _start():
         if start_session(pid, meta.get("path")):
             open_terminal_window(pid)
+        start_dev_server(pid, meta.get("path"), meta.get("server_cmd"))
         context = build_context_prompt(pid)
         if context:
             threading.Event().wait(3)
@@ -997,6 +1038,7 @@ def import_projects():
             "emoji": item.get("emoji", "📁"),
             "path": str(path.resolve()),
             "preview_url": "",
+            "server_cmd": "",
             "created": datetime.now().isoformat(),
             "status": "stopped",
         }

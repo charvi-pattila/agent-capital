@@ -22,19 +22,21 @@ const fmtSize = (n) => {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 };
 
-export default function PreviewPanel({ projectId, previewUrl, previewFile, onSaved }) {
+export default function PreviewPanel({ projectId, previewUrl, previewFile, serverCmd, serverRunning, onSaved }) {
   const hasTarget = !!(previewFile || previewUrl);
   const [editing, setEditing] = useState(!hasTarget);
   const [mode, setMode] = useState(previewFile ? "file" : "url");
   const [url, setUrl] = useState(previewUrl || "");
+  const [cmd, setCmd] = useState(serverCmd || "");
   const [saving, setSaving] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     setUrl(previewUrl || "");
+    setCmd(serverCmd || "");
     setMode(previewFile ? "file" : "url");
     setEditing(!(previewFile || previewUrl));
-  }, [previewUrl, previewFile]);
+  }, [previewUrl, previewFile, serverCmd]);
 
   const isSelfUrl = (u) => {
     try {
@@ -49,7 +51,7 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, onSav
     const trimmed = url.trim();
     if (!trimmed) return;
     setSaving(true);
-    await api.updateProject(projectId, { preview_url: trimmed, preview_file: "" });
+    await api.updateProject(projectId, { preview_url: trimmed, preview_file: "", server_cmd: cmd.trim() });
     setSaving(false);
     setEditing(false);
     onSaved && onSaved();
@@ -57,7 +59,7 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, onSav
 
   const saveFile = async (relPath) => {
     setSaving(true);
-    await api.updateProject(projectId, { preview_file: relPath, preview_url: "" });
+    await api.updateProject(projectId, { preview_file: relPath, preview_url: "", server_cmd: cmd.trim() });
     setSaving(false);
     setEditing(false);
     onSaved && onSaved();
@@ -93,17 +95,28 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, onSav
             <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 12 }}>
               The URL where <em>this project's</em> app runs (its own dev server or port) — it will be embedded below.
             </div>
-            <form onSubmit={saveUrl} style={{ display: "flex", gap: 10 }}>
-              <input
-                style={{ flex: 1 }}
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                placeholder="e.g. http://localhost:4173"
-                autoFocus
-              />
-              <button className="btn btn-primary btn-sm" type="submit" disabled={saving || !url.trim()}>
-                {saving ? "Saving..." : "Save"}
-              </button>
+            <form onSubmit={saveUrl} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Dev server command (optional)</label>
+                <input
+                  value={cmd}
+                  onChange={e => setCmd(e.target.value)}
+                  placeholder="e.g. npm run dev"
+                />
+                <div className="form-hint">Runs automatically in the project folder whenever you Start this project, so it's already live here.</div>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <input
+                  style={{ flex: 1 }}
+                  value={url}
+                  onChange={e => setUrl(e.target.value)}
+                  placeholder="e.g. http://localhost:4173"
+                  autoFocus
+                />
+                <button className="btn btn-primary btn-sm" type="submit" disabled={saving || !url.trim()}>
+                  {saving ? "Saving..." : "Save"}
+                </button>
+              </div>
             </form>
             {isSelfUrl(url.trim()) && (
               <div className="preview-warning">
@@ -138,6 +151,11 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, onSav
         <span className="terminal-title" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {previewFile ? `📄 ${previewFile}` : previewUrl}
         </span>
+        {!previewFile && serverCmd && (
+          <span className={`terminal-status ${serverRunning ? "online" : "offline"}`}>
+            {serverRunning ? "● server running" : "○ server stopped"}
+          </span>
+        )}
         <button className="btn btn-ghost btn-sm" onClick={() => setReloadKey(k => k + 1)}>↻ Refresh</button>
         <button className="btn btn-ghost btn-sm" onClick={() => setEditing(true)}>✎ Edit</button>
         <a className="btn btn-ghost btn-sm" href={openHref} target="_blank" rel="noreferrer">Open ↗</a>

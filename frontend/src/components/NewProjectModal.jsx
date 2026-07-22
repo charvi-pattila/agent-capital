@@ -9,6 +9,7 @@ export default function NewProjectModal({ onClose, onCreate }) {
     emoji: EMOJIS[0],
     path: "",
     first_message: "",
+    server_cmd: "",
     auto_start: true,
   });
 
@@ -54,6 +55,11 @@ export default function NewProjectModal({ onClose, onCreate }) {
           <div className="form-group">
             <label>Opening message for Claude (optional)</label>
             <textarea value={form.first_message} onChange={set("first_message")} placeholder="Tell Claude what to do first..." />
+          </div>
+          <div className="form-group">
+            <label>Dev server command (optional)</label>
+            <input value={form.server_cmd} onChange={set("server_cmd")} placeholder="e.g. npm run dev" />
+            <div className="form-hint">Runs automatically in the project folder whenever you Start this project — set the Preview tab's URL to match once it's running.</div>
           </div>
           <label className="form-check">
             <input
