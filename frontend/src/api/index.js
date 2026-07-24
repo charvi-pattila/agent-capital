@@ -61,6 +61,12 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type, content, component }),
   }).then(r => r.json()),
+  getGlobalMemory: () => fetch(`${BASE}/global-memory`).then(r => r.json()),
+  updateGlobalMemory: (content) => fetch(`${BASE}/global-memory`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  }).then(r => r.json()),
 
   // Testing
   getTests: (id) => fetch(`${BASE}/projects/${id}/tests`).then(r => r.json()),
@@ -70,6 +76,8 @@ export const api = {
     body: JSON.stringify(data),
   }).then(r => r.json()),
   runTests: (id) => fetch(`${BASE}/projects/${id}/tests/run`, { method: "POST" }).then(r => r.json()),
+  testImageUrl: (id, testId, kind) => `${BASE}/projects/${id}/tests/${testId}/image/${kind}`,
+  acceptTestBaseline: (id, testId) => fetch(`${BASE}/projects/${id}/tests/${testId}/accept-baseline`, { method: "POST" }).then(r => r.json()),
 
   // Running
   getRunning: () => fetch(`${BASE}/running`).then(r => r.json()),

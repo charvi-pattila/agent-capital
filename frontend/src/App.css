@@ -545,4 +545,21 @@ textarea { resize: vertical; min-height: 80px; }
   .content { padding: 12px; }
   .project-header { margin-bottom: 10px; }
   .project-tabs { margin-bottom: 12px; overflow-x: auto; }
+
+  /* Header action rows (Dashboard search/import/new, Running's session rows, Testing's
+     test rows) all use justify-content:space-between with fixed-width children — fine on
+     desktop, but on a narrow phone that pushes content past the edge or forces awkward
+     button-label wrapping. Letting them wrap to a second line keeps everything reachable
+     without introducing page-level horizontal scroll. */
+  .page-header { flex-wrap: wrap; }
+  .page-header-actions { flex-wrap: wrap; width: 100%; }
+  .page-header-actions .search-input { flex: 1 1 140px; width: auto; }
+  .page-header-actions .search-input:focus { width: auto; }
+  .session-card { flex-wrap: wrap; gap: 10px; }
+  .test-item { flex-wrap: wrap; gap: 10px; }
+  .terminal-header { flex-wrap: wrap; row-gap: 6px; }
+
+  /* Grid math (minmax(300px,1fr)) already fits a single column down to ~330px content
+     width, but forcing it removes any doubt at odd viewport/zoom combinations. */
+  .project-grid { grid-template-columns: 1fr; }
 }

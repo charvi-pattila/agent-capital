@@ -25,7 +25,12 @@ export default function TestPanel({ projectId }) {
     load();
   };
 
-  const statusIcon = (s) => ({ passing: "✅", failing: "❌", running: "⏳", pending: "⏸" }[s] || "⏸");
+  const statusIcon = (s) => ({ passing: "✅", failing: "❌", running: "⏳", pending: "⏸", baseline_saved: "📸" }[s] || "⏸");
+
+  const acceptBaseline = async (testId) => {
+    await api.acceptTestBaseline(projectId, testId);
+    load();
+  };
 
   return (
     <div className="test-panel">
@@ -82,22 +87,50 @@ export default function TestPanel({ projectId }) {
       ) : (
         <div className="test-list">
           {tests.map((t, i) => (
-            <div key={i} className="test-item">
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 18 }}>{statusIcon(t.status)}</span>
-                <div>
-                  <div style={{ fontWeight: 500, fontSize: 14 }}>{t.description || t.type}</div>
-                  {t.last_run && (
-                    <div style={{ fontSize: 12, color: "var(--text3)" }}>Last run: {new Date(t.last_run).toLocaleString()}</div>
-                  )}
-                  {t.error && (
-                    <div style={{ fontSize: 12, color: "var(--red)", marginTop: 4 }}>{t.error}</div>
+            <div key={i} className="test-item" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 18 }}>{statusIcon(t.status)}</span>
+                  <div>
+                    <div style={{ fontWeight: 500, fontSize: 14 }}>{t.description || t.type}</div>
+                    {t.last_run && (
+                      <div style={{ fontSize: 12, color: "var(--text3)" }}>Last run: {new Date(t.last_run).toLocaleString()}</div>
+                    )}
+                    {t.type === "screenshot" && typeof t.diff_percent === "number" && (
+                      <div style={{ fontSize: 12, color: "var(--text3)" }}>{t.diff_percent}% pixels differ from baseline</div>
+                    )}
+                    {t.error && (
+                      <div style={{ fontSize: 12, color: "var(--red)", marginTop: 4 }}>{t.error}</div>
+                    )}
+                  </div>
+                </div>
+                <span className={`tag ${t.status === "passing" ? "tag-running" : t.status === "failing" ? "tag-paused" : "tag-stopped"}`}>
+                  {t.status || "pending"}
+                </span>
+              </div>
+
+              {t.type === "screenshot" && t.last_run && (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
+                  {["baseline", "latest", "diff"].map(kind => (
+                    <div key={kind} style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4, textTransform: "capitalize" }}>{kind}</div>
+                      <img
+                        src={`${api.testImageUrl(projectId, t.id, kind)}?v=${t.last_run}`}
+                        alt={kind}
+                        style={{ width: 140, height: "auto", borderRadius: 6, border: "1px solid var(--border)", background: "#fff" }}
+                        onError={(e) => { e.target.style.visibility = "hidden"; }}
+                      />
+                    </div>
+                  ))}
+                  {t.status !== "baseline_saved" && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      style={{ alignSelf: "center" }}
+                      onClick={() => acceptBaseline(t.id)}
+                    >Accept as new baseline</button>
                   )}
                 </div>
-              </div>
-              <span className={`tag ${t.status === "passing" ? "tag-running" : t.status === "failing" ? "tag-paused" : "tag-stopped"}`}>
-                {t.status || "pending"}
-              </span>
+              )}
             </div>
           ))}
         </div>

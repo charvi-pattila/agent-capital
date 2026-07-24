@@ -63,7 +63,7 @@ export default function Dashboard() {
           <div className="page-title">Projects</div>
           <div className="page-subtitle">{projects.length} project{projects.length !== 1 ? "s" : ""}</div>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div className="page-header-actions" style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {projects.length > 0 && (
             <input
               className="search-input"

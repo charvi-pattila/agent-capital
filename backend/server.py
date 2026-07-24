@@ -2,14 +2,16 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import subprocess
 import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify, request, Response, send_file
+from flask import Flask, jsonify, request, Response, send_file, session, redirect
 from flask_cors import CORS
+from werkzeug.security import check_password_hash
 
 app = Flask(__name__)
 CORS(app)
@@ -18,6 +20,21 @@ CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 TMUX = "/opt/homebrew/bin/tmux"
 DATA_DIR = Path(__file__).parent.parent / "data" / "projects"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+# Single shared password (this is a personal, single-operator dashboard, not a
+# multi-user app). No password configured (no .auth_hash yet) => the login gate
+# is skipped entirely, so a fresh checkout still runs — see backend/set_password.py.
+AUTH_HASH_PATH = DATA_DIR.parent / ".auth_hash"
+SECRET_KEY_PATH = DATA_DIR.parent / ".secret_key"
+if SECRET_KEY_PATH.exists():
+    app.secret_key = SECRET_KEY_PATH.read_text().strip()
+else:
+    app.secret_key = secrets.token_hex(32)
+    SECRET_KEY_PATH.write_text(app.secret_key)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+# No SESSION_COOKIE_SECURE: this is served over plain HTTP on the LAN (see
+# serving-setup notes) — fine for a trusted home network, not for the open internet.
 
 # Default home for new project codebases. Relative paths (or a blank path)
 # entered when creating a project resolve here; absolute or ~-paths override it.
@@ -606,6 +623,72 @@ def limit_monitor():
         threading.Event().wait(LIMIT_CHECK_INTERVAL)
 
 
+# ── Blocked-session watchdog ─────────────────────────────────────────────────
+# Flags a running session as "blocked" in the Running tab once its pane has sat
+# unchanged past IDLE_THRESHOLD — the same stable-pane diffing technique
+# wait_for_stable_reply() already uses right after sending a message, just run
+# continuously in the background instead of once. Purely live/derived state
+# (never written to meta.json — it's a fact about the tmux pane, not the project).
+
+BLOCKED_CHECK_INTERVAL = 15  # seconds
+IDLE_THRESHOLD = 90          # seconds unchanged before flagging as blocked
+
+# Common Claude Code CLI confirmation/choice prompts — matching one gives a more
+# specific reason than the generic idle fallback.
+BLOCKED_PROMPT_RE = re.compile(
+    r"do you want to (?:proceed|continue)|\(y/n\)|❯\s*1\.|press enter to continue",
+    re.I,
+)
+
+_pane_watch = {}  # pid -> {"body": str, "changed_at": float}
+
+
+def _blocked_tick():
+    now = datetime.now().timestamp()
+    seen = set()
+    for meta in all_projects():
+        pid = meta["id"]
+        if not session_running(pid):
+            continue
+        seen.add(pid)
+        body = pane_body(capture_pane(pid))
+        with _lock:
+            prev = _pane_watch.get(pid)
+            if prev is None or prev["body"] != body:
+                _pane_watch[pid] = {"body": body, "changed_at": now}
+            # else: unchanged — leave changed_at as-is, it keeps aging
+
+    with _lock:
+        for pid in list(_pane_watch):
+            if pid not in seen:
+                del _pane_watch[pid]  # session no longer running — clear stale state
+
+
+def blocked_status(pid):
+    """Returns (status, blocked_reason) for a running session, or (None, None)."""
+    with _lock:
+        watch = _pane_watch.get(pid)
+    if not watch:
+        return None, None
+    idle_for = datetime.now().timestamp() - watch["changed_at"]
+    if idle_for < IDLE_THRESHOLD:
+        return None, None
+    m = BLOCKED_PROMPT_RE.search(watch["body"])
+    if m:
+        line = next((l.strip() for l in watch["body"].splitlines() if m.group(0).lower() in l.lower()), m.group(0))
+        return "blocked", f"Waiting on a prompt: {line[:120]}"
+    return "blocked", "Idle — may be waiting for input"
+
+
+def blocked_monitor():
+    while True:
+        try:
+            _blocked_tick()
+        except Exception as e:
+            print(f"[blocked-monitor] error: {e}")
+        threading.Event().wait(BLOCKED_CHECK_INTERVAL)
+
+
 # ── Memory helpers ────────────────────────────────────────────────────────────
 
 MEMORY_FILES = {
@@ -613,6 +696,22 @@ MEMORY_FILES = {
     "errors": "memory/errors.md",
     "skills": "memory/skills.md",
 }
+
+# Global memory: one free-form note shared across every project (unlike per-project
+# memory, "shared across all projects" doesn't need the last_session/errors/skills
+# taxonomy — it's a single running note, e.g. "always use tabs not spaces").
+GLOBAL_MEMORY_DIR = DATA_DIR.parent / "global_memory"
+GLOBAL_MEMORY_PATH = GLOBAL_MEMORY_DIR / "notes.md"
+
+
+def get_global_memory():
+    GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    return GLOBAL_MEMORY_PATH.read_text() if GLOBAL_MEMORY_PATH.exists() else ""
+
+
+def set_global_memory(content):
+    GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    GLOBAL_MEMORY_PATH.write_text(content)
 
 
 def get_memory(pid):
@@ -648,6 +747,9 @@ def build_context_prompt(pid):
     mem = get_memory(pid)
     lines = ["# Project Context - Read this to know where we left off\n"]
 
+    global_note = get_global_memory()
+    if global_note:
+        lines.append(f"## Global Memory (shared across all projects)\n{global_note}\n")
     if mem["memory"]["last_session"]:
         lines.append(f"## Last Session\n{mem['memory']['last_session']}\n")
     if mem["memory"]["errors"]:
@@ -669,7 +771,11 @@ def get_running_sessions():
     result = []
     for p in all_projects():
         if session_running(p["id"]):
-            result.append({**p, "status": "running"})
+            status, blocked_reason = blocked_status(p["id"])
+            entry = {**p, "status": status or "running"}
+            if blocked_reason:
+                entry["blocked_reason"] = blocked_reason
+            result.append(entry)
     return result
 
 
@@ -689,15 +795,78 @@ def save_tests(pid, tests):
     tests_path(pid).write_text(json.dumps(tests, indent=2))
 
 
+# ── Screenshot comparison tests ──────────────────────────────────────────────
+# Shells out to the Chrome already on the Mac (no Playwright/Selenium install) and
+# diffs pixels with Pillow. First run on a test just records the baseline; every
+# run after that compares against it and fails once the differing-pixel share
+# crosses SCREENSHOT_DIFF_THRESHOLD.
+
+CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+SCREENSHOT_DIFF_THRESHOLD = 1.0  # percent of pixels allowed to differ before a fail
+
+
+def screenshot_test_dir(pid, test_id):
+    d = project_dir(pid) / "tests" / test_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def capture_screenshot(url, out_path):
+    try:
+        subprocess.run(
+            [CHROME_BIN, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+             "--window-size=1280,800", f"--screenshot={out_path}", url],
+            capture_output=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return Path(out_path).exists()
+
+
+def diff_screenshots(baseline_path, latest_path, diff_path):
+    """Saves a diff image and returns the % of pixels that differ."""
+    from PIL import Image, ImageChops
+    a = Image.open(baseline_path).convert("RGB")
+    b = Image.open(latest_path).convert("RGB")
+    if a.size != b.size:
+        b = b.resize(a.size)
+    diff = ImageChops.difference(a, b)
+    diff.save(diff_path)
+    # ignore very small per-channel deltas (anti-aliasing/font-rendering noise)
+    mask = diff.convert("L").point(lambda p: 255 if p > 8 else 0)
+    changed = mask.histogram()[255]
+    total = a.size[0] * a.size[1]
+    return round(100 * changed / total, 2) if total else 0.0
+
+
+def run_screenshot_test(pid, test):
+    if not test.get("target_url"):
+        test["status"] = "failing"
+        test["error"] = "No target URL set"
+        return
+    d = screenshot_test_dir(pid, test["id"])
+    baseline, latest, diff = d / "baseline.png", d / "latest.png", d / "diff.png"
+    if not capture_screenshot(test["target_url"], latest):
+        test["status"] = "failing"
+        test["error"] = "Could not capture screenshot (is the URL reachable?)"
+        return
+    if not baseline.exists():
+        baseline.write_bytes(latest.read_bytes())
+        test["status"] = "baseline_saved"
+        test["error"] = ""
+        test["diff_percent"] = 0.0
+        return
+    percent = diff_screenshots(baseline, latest, diff)
+    test["diff_percent"] = percent
+    test["status"] = "passing" if percent < SCREENSHOT_DIFF_THRESHOLD else "failing"
+    test["error"] = "" if test["status"] == "passing" else f"{percent}% of pixels differ from baseline"
+
+
 def run_tests_for_project(pid):
     tests = load_tests(pid)
-    name = (load_meta(pid) or {}).get("name", pid)
-    if not tests or not session_running(pid):
-        for t in tests:
-            t["status"] = "failing"
-            t["error"] = "Session not running"
-        save_tests(pid, tests)
+    if not tests:
         return
+    name = (load_meta(pid) or {}).get("name", pid)
 
     for i, test in enumerate(tests):
         tests[i]["status"] = "running"
@@ -705,6 +874,15 @@ def run_tests_for_project(pid):
     save_tests(pid, tests)
 
     for i, test in enumerate(tests):
+        if test.get("type") == "screenshot":
+            run_screenshot_test(pid, tests[i])
+            continue
+
+        if not session_running(pid):
+            tests[i]["status"] = "failing"
+            tests[i]["error"] = "Session not running"
+            continue
+
         prompt = f"Run this test and tell me if it passes. Reply with PASS or FAIL followed by a brief reason.\nTest: {test['description']}"
         if test.get("target_url"):
             prompt += f"\nURL to check: {test['target_url']}"
@@ -1180,6 +1358,18 @@ def set_memory_route(pid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/global-memory")
+def get_global_memory_route():
+    return jsonify({"content": get_global_memory()})
+
+
+@app.route("/api/global-memory", methods=["PUT"])
+def set_global_memory_route():
+    data = request.get_json() or {}
+    set_global_memory(data.get("content", ""))
+    return jsonify({"ok": True})
+
+
 @app.route("/api/projects/<pid>/tests")
 def get_tests(pid):
     return jsonify(load_tests(pid))
@@ -1206,6 +1396,36 @@ def create_test(pid):
 def run_tests(pid):
     threading.Thread(target=run_tests_for_project, args=(pid,), daemon=True).start()
     return jsonify({"status": "started"})
+
+
+@app.route("/api/projects/<pid>/tests/<test_id>/image/<kind>")
+def test_screenshot_image(pid, test_id, kind):
+    if kind not in ("baseline", "latest", "diff"):
+        return jsonify({"error": "Not found"}), 404
+    if not any(t["id"] == test_id for t in load_tests(pid)):
+        return jsonify({"error": "Not found"}), 404
+    path = screenshot_test_dir(pid, test_id) / f"{kind}.png"
+    if not path.exists():
+        return jsonify({"error": "Not found"}), 404
+    return send_file(path, mimetype="image/png")
+
+
+@app.route("/api/projects/<pid>/tests/<test_id>/accept-baseline", methods=["POST"])
+def accept_test_baseline(pid, test_id):
+    tests = load_tests(pid)
+    test = next((t for t in tests if t["id"] == test_id), None)
+    if not test:
+        return jsonify({"error": "Not found"}), 404
+    d = screenshot_test_dir(pid, test_id)
+    latest = d / "latest.png"
+    if not latest.exists():
+        return jsonify({"error": "No captured screenshot to accept yet"}), 400
+    (d / "baseline.png").write_bytes(latest.read_bytes())
+    test["status"] = "passing"
+    test["error"] = ""
+    test["diff_percent"] = 0.0
+    save_tests(pid, tests)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/running")
@@ -1243,6 +1463,60 @@ def health():
     return jsonify({"status": "ok"})
 
 
+LOGIN_PAGE = """<!doctype html>
+<html><head><title>Claude Manager — Login</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {{ background:#0d0d0d; color:#e8e8e8; font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+    display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
+  form {{ background:#1c1c1c; padding:32px; border-radius:12px; border:1px solid #2a2a2a; width:280px; }}
+  h1 {{ font-size:16px; margin:0 0 20px; }}
+  input {{ width:100%; box-sizing:border-box; padding:10px; border-radius:8px; border:1px solid #333;
+    background:#111; color:#e8e8e8; margin-bottom:14px; font-size:14px; }}
+  button {{ width:100%; padding:10px; border-radius:8px; border:none; background:#7c5cfc;
+    color:#fff; font-weight:600; font-size:14px; cursor:pointer; }}
+  .err {{ color:#f87171; font-size:13px; margin-bottom:14px; }}
+</style></head>
+<body>
+  <form method="POST" action="/login">
+    <h1>Claude Manager</h1>
+    {error}
+    <input type="password" name="password" placeholder="Password" autofocus>
+    <button type="submit">Log in</button>
+  </form>
+</body></html>"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        stored = AUTH_HASH_PATH.read_text().strip() if AUTH_HASH_PATH.exists() else None
+        if stored and check_password_hash(stored, request.form.get("password", "")):
+            session["authed"] = True
+            return redirect("/")
+        return LOGIN_PAGE.format(error='<div class="err">Wrong password.</div>'), 401
+    return LOGIN_PAGE.format(error="")
+
+
+@app.route("/logout")
+def logout():
+    session.pop("authed", None)
+    return redirect("/login")
+
+
+@app.before_request
+def require_login():
+    # AUTH_HASH_PATH is checked fresh on every request (not cached at startup), so
+    # running set_password.py turns the gate on immediately — no backend restart needed.
+    if not AUTH_HASH_PATH.exists():
+        return
+    if request.path in ("/login", "/logout") or session.get("authed"):
+        return
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "unauthorized"}), 401
+    return redirect("/login")
+
+
 # ── Frontend (built app) ──────────────────────────────────────────────────────
 # Serves frontend/dist so the whole app lives on one port (8888) and is
 # reachable from the phone. Rebuild with `npm run build` after frontend changes.
@@ -1267,5 +1541,6 @@ def serve_frontend(path=""):
 
 if __name__ == "__main__":
     threading.Thread(target=limit_monitor, daemon=True).start()
+    threading.Thread(target=blocked_monitor, daemon=True).start()
     print("Claude Manager backend running on http://0.0.0.0:8888")
     app.run(host="0.0.0.0", port=8888, debug=False, threaded=True)
