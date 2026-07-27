@@ -5,8 +5,10 @@ import Chat from "../components/Chat";
 import MemoryPanel from "../components/MemoryPanel";
 import TestPanel from "../components/TestPanel";
 import PreviewPanel from "../components/PreviewPanel";
+import AboutPanel from "../components/AboutPanel";
+import CouncilPanel from "../components/CouncilPanel";
 
-const TABS = ["Chat", "Memory", "Testing", "Preview"];
+const TABS = ["Chat", "Memory", "Testing", "Preview", "Council", "About"];
 
 export default function Project() {
   const { id } = useParams();
@@ -87,6 +89,8 @@ export default function Project() {
             onSaved={load}
           />
         )}
+        {tab === "Council" && <CouncilPanel projectId={id} />}
+        {tab === "About" && <AboutPanel project={project} onSaved={load} />}
       </div>
     </div>
   );

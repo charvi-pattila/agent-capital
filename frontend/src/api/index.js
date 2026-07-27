@@ -15,6 +15,7 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   }).then(r => r.json()),
+  generateDescription: (id) => fetch(`${BASE}/projects/${id}/generate-description`, { method: "POST" }).then(r => r.json()),
 
   // Session control
   startProject: (id) => fetch(`${BASE}/projects/${id}/start`, { method: "POST" }).then(r => r.json()),
@@ -34,6 +35,12 @@ export const api = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ direction, count }),
+  }).then(r => r.json()),
+
+  sendKeys: (id, keys) => fetch(`${BASE}/projects/${id}/send-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keys }),
   }).then(r => r.json()),
 
   uploadFile: (id, file) => {
@@ -81,6 +88,10 @@ export const api = {
 
   // Running
   getRunning: () => fetch(`${BASE}/running`).then(r => r.json()),
+
+  // Council
+  getCouncil: (id) => fetch(`${BASE}/projects/${id}/council`).then(r => r.json()),
+  runCouncil: (id) => fetch(`${BASE}/projects/${id}/council/run`, { method: "POST" }).then(r => r.json()),
 };
 
 export const streamMessages = (projectId, onMessage) => {
@@ -94,5 +105,12 @@ export const streamRunning = (onUpdate) => {
   const es = new EventSource(`/api/running/stream`);
   es.onmessage = (e) => onUpdate(JSON.parse(e.data));
   es.onerror = () => { es.close(); setTimeout(() => streamRunning(onUpdate), 2000); };
+  return () => es.close();
+};
+
+export const streamCouncil = (projectId, onUpdate) => {
+  const es = new EventSource(`/api/projects/${projectId}/council/stream`);
+  es.onmessage = (e) => onUpdate(JSON.parse(e.data));
+  es.onerror = () => { es.close(); setTimeout(() => streamCouncil(projectId, onUpdate), 2000); };
   return () => es.close();
 };

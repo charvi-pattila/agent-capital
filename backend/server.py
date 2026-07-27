@@ -1,11 +1,16 @@
+import atexit
+import hashlib
 import json
 import mimetypes
 import os
 import re
 import secrets
+import signal
 import subprocess
+import sys
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -70,6 +75,7 @@ def resolve_project_path(raw_path, name):
 
 _sse_listeners: dict = {}  # project_id -> [queue, ...]
 _running_listeners: list = []
+_council_listeners: dict = {}  # project_id -> [queue, ...]
 _lock = threading.Lock()
 
 
@@ -83,6 +89,18 @@ def broadcast(project_id, data):
                 dead.append(q)
         for q in dead:
             _sse_listeners[project_id].remove(q)
+
+
+def broadcast_council(project_id, data):
+    with _lock:
+        dead = []
+        for q in _council_listeners.get(project_id, []):
+            try:
+                q.put_nowait(data)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _council_listeners[project_id].remove(q)
 
 
 def broadcast_running(data):
@@ -904,6 +922,174 @@ def run_tests_for_project(pid):
     save_tests(pid, tests)
 
 
+# ── Council: 5 independent Claude testers auto-review every change ─────────────
+# After each chat turn, if the working tree changed, 5 one-shot `claude -p`
+# instances (independent of the interactive session, no shared context) each
+# read the diff, invent their own test cases, and vote APPROVE/REJECT. If it's
+# not unanimous, the rejection reasons are fed back into the live session to
+# fix, and the council re-runs on the new diff — up to COUNCIL_MAX_ATTEMPTS.
+
+COUNCIL_TESTER_COUNT = 5
+COUNCIL_MAX_ATTEMPTS = 3
+
+COUNCIL_TESTER_PROMPT = """You are an independent QA tester reviewing a code change just made to this project, as tester #{n} of {total} on a review council — all {total} must approve before the change ships. Don't assume the other testers cover anything; test thoroughly on your own, and don't edit any files.
+
+Read the code and the diff below, understand what changed, then think of realistic edge cases and failure modes and actually verify them however you can (read the surrounding code paths, run the project's existing test/build/lint commands if any exist, trace through logic by hand). Be skeptical — your job is to find real problems, not rubber-stamp the change.
+
+Diff of what changed:
+```
+{diff}
+```
+
+Reply with your verdict as the FIRST line, exactly "APPROVE" or "REJECT", followed by a short explanation (2-5 sentences: what you tested and why)."""
+
+
+def council_path(pid):
+    return project_dir(pid) / "council.json"
+
+
+def load_council(pid):
+    p = council_path(pid)
+    if p.exists():
+        return json.loads(p.read_text())
+    return {"state": "idle", "last_signature": None, "runs": []}
+
+
+def save_council(pid, data):
+    council_path(pid).write_text(json.dumps(data, indent=2))
+    broadcast_council(pid, data)
+
+
+def is_git_repo(path):
+    return (Path(path) / ".git").exists()
+
+
+def _git(path, *args):
+    return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=20)
+
+
+def _compute_diff_signature(path):
+    """Everything currently different from HEAD — tracked-file diff plus a
+    preview of untracked new files — so a run captures uncommitted work too,
+    since Claude Code doesn't commit on its own."""
+    tracked = _git(path, "diff", "HEAD").stdout
+    status = _git(path, "status", "--porcelain").stdout
+    untracked = [line[3:] for line in status.splitlines() if line.startswith("??")]
+    preview = ""
+    for f in untracked[:20]:
+        fp = Path(path) / f
+        try:
+            if fp.is_file() and fp.stat().st_size < 20000:
+                preview += f"\n--- new file: {f} ---\n{fp.read_text(errors='ignore')}\n"
+        except Exception:
+            pass
+    full = tracked + preview
+    signature = hashlib.sha256(full.encode()).hexdigest()
+    return full, signature
+
+
+def _run_council_tester(path, diff_text, n):
+    prompt = COUNCIL_TESTER_PROMPT.format(n=n, total=COUNCIL_TESTER_COUNT, diff=diff_text[:12000])
+    try:
+        result = subprocess.run(
+            [CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
+            cwd=path, capture_output=True, text=True, timeout=240,
+        )
+        out = result.stdout.strip()
+    except Exception as e:
+        return {"name": f"Tester {n}", "verdict": "ERROR", "reason": str(e)}
+    lines = out.splitlines()
+    first = lines[0].strip().upper() if lines else ""
+    verdict = "APPROVE" if first.startswith("APPROVE") else "REJECT"
+    reason = "\n".join(lines[1:]).strip() or out
+    return {"name": f"Tester {n}", "verdict": verdict, "reason": reason[:2000]}
+
+
+def run_council(pid):
+    """Entry point called after a chat turn completes. No-ops unless the
+    project is a git repo with a real, not-yet-reviewed change, and skips if
+    a council run is already in flight for this project."""
+    meta = load_meta(pid)
+    if not meta:
+        return
+    path = meta.get("path")
+    if not path or not os.path.isdir(path) or not is_git_repo(path):
+        return
+
+    council = load_council(pid)
+    if council.get("state") in ("running_council", "fixing"):
+        return
+
+    diff_text, signature = _compute_diff_signature(path)
+    if not diff_text.strip() or signature == council.get("last_signature"):
+        return
+
+    council["last_signature"] = signature
+    _council_loop(pid, path, diff_text, council, attempt=1)
+
+
+def _council_loop(pid, path, diff_text, council, attempt):
+    name = (load_meta(pid) or {}).get("name", pid)
+    run = {
+        "id": uuid.uuid4().hex[:8],
+        "attempt": attempt,
+        "started": datetime.now().isoformat(),
+        "finished": None,
+        "diff_preview": diff_text[:4000],
+        "testers": [],
+        "approved": None,
+    }
+    council["state"] = "running_council"
+    council.setdefault("runs", []).append(run)
+    save_council(pid, council)
+
+    with ThreadPoolExecutor(max_workers=COUNCIL_TESTER_COUNT) as ex:
+        futures = [ex.submit(_run_council_tester, path, diff_text, n) for n in range(1, COUNCIL_TESTER_COUNT + 1)]
+        testers = [f.result() for f in futures]
+
+    run["testers"] = testers
+    run["approved"] = all(t["verdict"] == "APPROVE" for t in testers)
+    run["finished"] = datetime.now().isoformat()
+    n_reject = sum(1 for t in testers if t["verdict"] != "APPROVE")
+
+    if run["approved"] or attempt >= COUNCIL_MAX_ATTEMPTS or not session_running(pid):
+        council["state"] = "approved" if run["approved"] else "gave_up"
+        save_council(pid, council)
+        if run["approved"]:
+            notify_macos(name, "✅ Council approved the latest change (5/5)")
+        else:
+            notify_macos(name, f"⚠️ Council: {n_reject}/5 testers found issues after {attempt} attempt(s) — see Council tab")
+        return
+
+    # Not unanimous and attempts remain: hand the rejection reasons back to the
+    # live session to fix, then re-run the council against the new diff.
+    council["state"] = "fixing"
+    save_council(pid, council)
+
+    feedback = "\n\n".join(
+        f"Tester {i + 1}: {t['reason']}" for i, t in enumerate(testers) if t["verdict"] != "APPROVE"
+    )
+    fix_prompt = (
+        f"The council of independent testers reviewed your last change and {n_reject}/5 found problems. "
+        f"Please fix the issues below, then let me know when you're done.\n\n{feedback}"
+    )
+
+    msgs = load_messages(pid)
+    next_id = (max(m["id"] for m in msgs) + 1) if msgs else 1
+    reply_id = next_id + 1
+    append_message(pid, {"id": next_id, "role": "user", "text": "[Council feedback]\n" + fix_prompt, "status": "done", "timestamp": datetime.now().isoformat()})
+    append_message(pid, {"id": reply_id, "role": "assistant", "text": "Addressing council feedback...", "status": "thinking", "timestamp": datetime.now().isoformat()})
+    send_to_session(pid, fix_prompt, reply_id, name, notify=False)
+
+    new_diff, new_sig = _compute_diff_signature(path)
+    council["last_signature"] = new_sig
+    if not new_diff.strip():
+        council["state"] = "gave_up"
+        save_council(pid, council)
+        return
+    _council_loop(pid, path, new_diff, council, attempt + 1)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/projects")
@@ -974,10 +1160,43 @@ def update_project(pid):
     if not meta:
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
-    for field in ("preview_url", "preview_file", "server_cmd"):
+    for field in ("preview_url", "preview_file", "server_cmd", "description"):
         if field in data:
             meta[field] = data[field]
     save_meta(pid, meta)
+    return jsonify(meta)
+
+
+@app.route("/api/projects/<pid>/generate-description", methods=["POST"])
+def generate_description(pid):
+    meta = load_meta(pid)
+    if not meta:
+        return jsonify({"error": "Not found"}), 404
+    path = meta.get("path")
+    if not path or not os.path.isdir(path):
+        return jsonify({"error": "Project path not found"}), 400
+
+    prompt = (
+        "Read through this project's code and files (package.json, README, source "
+        "files, etc.) and write a concise 1-2 sentence description of what this "
+        "project does. Reply with only the description text itself, no preamble, "
+        "no quotes, no markdown."
+    )
+    try:
+        result = subprocess.run(
+            [CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
+            cwd=path, capture_output=True, text=True, timeout=90,
+        )
+        desc = result.stdout.strip()
+    except Exception as e:
+        desc = ""
+        print(f"generate_description failed for {pid}: {e}")
+
+    if not desc:
+        desc = guess_description(Path(path))
+    if desc:
+        meta["description"] = desc[:400]
+        save_meta(pid, meta)
     return jsonify(meta)
 
 
@@ -1023,8 +1242,10 @@ def pause_project(pid):
     return jsonify({"status": "stopped"})
 
 
-@app.route("/api/close-all", methods=["POST"])
-def close_all():
+def _close_all_sessions():
+    """Gracefully stop every running session (save a handoff summary, then kill
+    the tmux session) in parallel. Shared by the Close All button and the
+    server's own shutdown hook."""
     running = get_running_sessions()
     threads = []
     for p in running:
@@ -1033,7 +1254,13 @@ def close_all():
         threads.append(t)
     for t in threads:
         t.join(timeout=130)
-    return jsonify({"ok": True, "saved": [p["id"] for p in running]})
+    return running
+
+
+@app.route("/api/close-all", methods=["POST"])
+def close_all():
+    saved = _close_all_sessions()
+    return jsonify({"ok": True, "saved": [p["id"] for p in saved]})
 
 
 @app.route("/api/projects/<pid>/upload", methods=["POST"])
@@ -1265,9 +1492,50 @@ def send_message(pid):
             m["last_activity"] = datetime.now().isoformat()
             m["unread"] = m.get("unread", 0) + 1
             save_meta(pid, m)
+        run_council(pid)
 
     threading.Thread(target=_watch, daemon=True).start()
     return jsonify({"status": "sent"})
+
+
+@app.route("/api/projects/<pid>/council")
+def get_council(pid):
+    data = load_council(pid)
+    meta = load_meta(pid) or {}
+    data["git_repo"] = bool(meta.get("path")) and is_git_repo(meta["path"])
+    return jsonify(data)
+
+
+@app.route("/api/projects/<pid>/council/run", methods=["POST"])
+def trigger_council(pid):
+    threading.Thread(target=run_council, args=(pid,), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/projects/<pid>/council/stream")
+def council_stream(pid):
+    import queue as q_mod
+    queue = q_mod.Queue()
+    with _lock:
+        _council_listeners.setdefault(pid, []).append(queue)
+
+    def gen():
+        try:
+            yield f"data: {json.dumps(load_council(pid))}\n\n"
+            while True:
+                try:
+                    data = queue.get(timeout=30)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except Exception:
+                    yield ": ping\n\n"
+        finally:
+            with _lock:
+                try:
+                    _council_listeners[pid].remove(queue)
+                except ValueError:
+                    pass
+
+    return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _do_send_message(pid, text, notify=True):
@@ -1297,6 +1565,33 @@ def scroll_terminal(pid):
     count = max(1, min(int(data.get("count", 1)), 10))
     for _ in range(count):
         subprocess.run([TMUX, "send-keys", "-t", session_name(pid), key])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/projects/<pid>/send-keys", methods=["POST"])
+def send_keys(pid):
+    """Forward literal tmux key names (arrow keys, Enter, ...) into the session —
+    lets the UI drive Claude Code's own interactive select prompts (numbered
+    option lists with a '❯' cursor) by clicking instead of arrowing manually.
+
+    Keys are sent one at a time with a short gap between them, not bundled into
+    a single tmux send-keys call — confirmed by direct testing against a real
+    Claude Code select prompt that bundling them (zero delay) causes its Ink
+    input handler to silently drop all but the last key, e.g. "Down Enter" in
+    one call just re-selects the already-highlighted option instead of moving
+    the cursor first."""
+    if not session_running(pid):
+        return jsonify({"ok": False}), 400
+    data = request.get_json() or {}
+    allowed = {"Up", "Down", "Left", "Right", "Enter", "Tab", "Escape", "Space"}
+    keys = [k for k in data.get("keys", []) if k in allowed][:30]
+    if not keys:
+        return jsonify({"ok": False, "error": "no valid keys"}), 400
+    session = session_name(pid)
+    for i, key in enumerate(keys):
+        if i > 0:
+            threading.Event().wait(0.06)
+        subprocess.run([TMUX, "send-keys", "-t", session, key])
     return jsonify({"ok": True})
 
 
@@ -1539,7 +1834,35 @@ def serve_frontend(path=""):
     return send_file(index)
 
 
+_shutdown_done = False
+
+
+def _shutdown_once():
+    """Kill every running tmux session (Claude + dev server) when the app
+    itself is closed, so nothing is left running orphaned in the background.
+    Reuses the same graceful save-then-kill path as the Close All button.
+    Guarded so both the signal handler and atexit firing don't double-run it."""
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
+    running = get_running_sessions()
+    if not running:
+        return
+    print(f"[shutdown] closing {len(running)} running session(s)...")
+    _close_all_sessions()
+    print("[shutdown] done")
+
+
+def _handle_shutdown_signal(signum, frame):
+    _shutdown_once()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    atexit.register(_shutdown_once)
     threading.Thread(target=limit_monitor, daemon=True).start()
     threading.Thread(target=blocked_monitor, daemon=True).start()
     print("Claude Manager backend running on http://0.0.0.0:8888")

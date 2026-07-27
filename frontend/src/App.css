@@ -305,6 +305,7 @@ textarea { resize: vertical; min-height: 80px; }
 .tag-running { background: rgba(34,197,94,0.15); color: var(--green); }
 .tag-paused { background: rgba(234,179,8,0.15); color: var(--yellow); }
 .tag-stopped { background: rgba(90,90,114,0.15); color: var(--text3); }
+.tag-failed { background: rgba(239,68,68,0.15); color: var(--red); }
 
 /* Search */
 .search-input {

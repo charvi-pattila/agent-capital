@@ -1,5 +1,40 @@
 import { useState, useEffect, useRef } from "react";
-import { api } from "../api";
+import { api, streamCouncil } from "../api";
+
+// Claude Code's own interactive select prompts (numbered options with a "❯"
+// cursor, navigated via arrow keys) render as plain text in the terminal
+// mirror. Detect the block around the cursor so it can be offered as
+// clickable chips instead of requiring the user to arrow through manually.
+const OPTION_LINE = /^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$/;
+
+function parseSelectPrompt(content) {
+  if (!content) return null;
+  const lines = content.split("\n");
+
+  let cursorLine = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(OPTION_LINE);
+    if (m && m[1]) { cursorLine = i; break; }
+  }
+  if (cursorLine === -1) return null;
+
+  let start = cursorLine;
+  while (start - 1 >= 0 && lines[start - 1].trim() !== "") start--;
+  let end = cursorLine;
+  while (end + 1 < lines.length && lines[end + 1].trim() !== "") end++;
+
+  const options = [];
+  let cursorPos = -1;
+  for (let i = start; i <= end; i++) {
+    const m = lines[i].match(OPTION_LINE);
+    if (m) {
+      if (m[1]) cursorPos = options.length;
+      options.push({ number: m[2], label: m[3] });
+    }
+  }
+  if (options.length < 2 || cursorPos === -1) return null;
+  return { options, cursorPos };
+}
 
 export default function Chat({ projectId, status }) {
   const [content, setContent] = useState("");
@@ -12,6 +47,7 @@ export default function Chat({ projectId, status }) {
   // (frozen text is readable/selectable while Claude streams); the latest
   // content keeps buffering in latestRef and is applied on resume.
   const [pinned, setPinned] = useState(true);
+  const [councilState, setCouncilState] = useState("idle");
   const termRef = useRef(null);
   const esRef = useRef(null);
   const pinnedRef = useRef(true);
@@ -49,6 +85,13 @@ export default function Chat({ projectId, status }) {
     };
 
     return () => es.close();
+  }, [projectId]);
+
+  // The council pastes its fix-feedback into this same tmux session — while
+  // that's in flight, block typing here so the two don't interleave.
+  useEffect(() => {
+    const stop = streamCouncil(projectId, d => setCouncilState(d.state || "idle"));
+    return stop;
   }, [projectId]);
 
   // Keep the view glued to the bottom while following (runs after render,
@@ -150,7 +193,30 @@ export default function Chat({ projectId, status }) {
     setSending(false);
   };
 
+  const selectPrompt = !offline ? parseSelectPrompt(content) : null;
+
+  const chooseOption = (targetIdx) => {
+    if (!selectPrompt) return;
+    const delta = targetIdx - selectPrompt.cursorPos;
+    const step = delta > 0 ? "Down" : "Up";
+    const keys = Array(Math.abs(delta)).fill(step);
+    keys.push("Enter");
+    api.sendKeys(projectId, keys).catch(() => {});
+  };
+
   const handleKeyDown = (e) => {
+    // While an interactive select prompt is showing, a bare number key picks
+    // that option directly (same Up/Down+Enter forwarding as clicking a chip)
+    // instead of being typed as text — only when the box is still empty, so
+    // it never hijacks a real answer that happens to start with a digit.
+    if (selectPrompt && input === "" && /^[1-9]$/.test(e.key)) {
+      const idx = selectPrompt.options.findIndex(o => o.number === e.key);
+      if (idx !== -1) {
+        e.preventDefault();
+        chooseOption(idx);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send(e);
@@ -195,6 +261,21 @@ export default function Chat({ projectId, status }) {
         )}
       </div>
 
+      {selectPrompt && (
+        <div className="select-prompt-row">
+          {selectPrompt.options.map((opt, i) => (
+            <button
+              type="button"
+              key={i}
+              className={"select-chip" + (i === selectPrompt.cursorPos ? " active" : "")}
+              onClick={() => chooseOption(i)}
+            >
+              {opt.number}. {opt.label.length > 44 ? opt.label.slice(0, 44) + "…" : opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {images.length > 0 && (
         <div className="attach-row">
           {images.map((img, i) => (
@@ -212,6 +293,12 @@ export default function Chat({ projectId, status }) {
         </div>
       )}
 
+      {councilState === "fixing" && (
+        <div className="council-banner">
+          ⚖️ Council is sending feedback to Claude — input is paused so it doesn't get mixed in.
+        </div>
+      )}
+
       <form className="terminal-input-row" onSubmit={send}>
         <span className="terminal-prompt">❯</span>
         <textarea
@@ -220,17 +307,15 @@ export default function Chat({ projectId, status }) {
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={offline ? "Start session to send messages..." : "Type a message... (paste or drop screenshots, Enter to send)"}
-          disabled={offline || sending}
+          placeholder={
+            councilState === "fixing"
+              ? "Council is talking to Claude right now..."
+              : offline ? "Start session to send messages..." : "Type and press Enter..."
+          }
+          disabled={offline || sending || councilState === "fixing"}
           rows={1}
         />
-        <button
-          className="btn btn-primary btn-sm"
-          type="submit"
-          disabled={offline || sending || (!input.trim() && images.length === 0)}
-        >
-          {sending ? "..." : "Send"}
-        </button>
+        <span className="terminal-send-hint">{sending ? "sending…" : "↵"}</span>
       </form>
     </div>
   );
