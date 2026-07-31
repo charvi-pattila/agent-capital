@@ -6,6 +6,7 @@ export default function CloseAllModal({ onClose }) {
   const [phase, setPhase] = useState("loading");
   const [targets, setTargets] = useState([]); // projects being closed
   const [remaining, setRemaining] = useState([]); // ids still running
+  const [report, setReport] = useState(null); // daily-report outcome from close-all
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -31,11 +32,14 @@ export default function CloseAllModal({ onClose }) {
     }, 2000);
 
     try {
-      await api.closeAll();
+      const res = await api.closeAll();
       clearInterval(pollRef.current);
       setRemaining([]);
+      setReport(res.report || null);
       setPhase("done");
-      setTimeout(onClose, 2500);
+      // Stay open when there's a report outcome worth reading (especially a
+      // failed send) instead of auto-dismissing it out from under the user.
+      if (res.report?.emailed) setTimeout(onClose, 4000);
     } catch (_) {
       clearInterval(pollRef.current);
       setPhase("error");
@@ -107,6 +111,13 @@ export default function CloseAllModal({ onClose }) {
                 );
               })}
             </ul>
+            {phase === "done" && report && (
+              <div className={"report-note" + (report.emailed ? " sent" : "")}>
+                {report.emailed
+                  ? <>📧 Daily report emailed — {report.projects} project{report.projects !== 1 ? "s" : ""} covered.</>
+                  : <>📄 {report.detail}{report.pdf ? <div className="report-path">{report.pdf}</div> : null}</>}
+              </div>
+            )}
             {phase === "done" && (
               <div className="modal-actions">
                 <button className="btn btn-primary" onClick={onClose}>Done</button>

@@ -76,6 +76,7 @@ def resolve_project_path(raw_path, name):
 _sse_listeners: dict = {}  # project_id -> [queue, ...]
 _running_listeners: list = []
 _council_listeners: dict = {}  # project_id -> [queue, ...]
+_split_listeners: dict = {}  # project_id -> [queue, ...]
 _lock = threading.Lock()
 
 
@@ -101,6 +102,18 @@ def broadcast_council(project_id, data):
                 dead.append(q)
         for q in dead:
             _council_listeners[project_id].remove(q)
+
+
+def broadcast_split(project_id, data):
+    with _lock:
+        dead = []
+        for q in _split_listeners.get(project_id, []):
+            try:
+                q.put_nowait(data)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _split_listeners[project_id].remove(q)
 
 
 def broadcast_running(data):
@@ -199,21 +212,64 @@ def stop_dev_server(pid):
         subprocess.run([TMUX, "kill-session", "-t", server_session_name(pid)])
 
 
-def capture_pane(pid):
+def capture_session_pane(session):
     r = subprocess.run(
-        [TMUX, "capture-pane", "-t", session_name(pid), "-p", "-S", "-500"],
+        [TMUX, "capture-pane", "-t", session, "-p", "-S", "-500"],
         capture_output=True, text=True
     )
     ansi = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi.sub('', r.stdout)
 
 
-def start_session(pid, project_path=None):
-    session = session_name(pid)
-    if session_running(pid):
+def capture_pane(pid):
+    return capture_session_pane(session_name(pid))
+
+
+def paste_into_session(session, message, delay=0.3):
+    """Type a message into a Claude Code tmux session and submit it. Used for the
+    project's own session and for each split agent's session alike.
+
+    Two subtleties, both verified against a live tmux server:
+    - Paste buffers are GLOBAL, not per-session ("set-buffer -t" targets a client,
+      not a session). With several senders in flight at once — chat, the split
+      briefing thread, six agent input boxes — an unnamed buffer lets one
+      message get pasted into another agent's session. A uniquely named buffer
+      per call makes delivery race-free; -d drops it once pasted.
+    - "--" terminates the option list, so a message starting with "-" (a markdown
+      bullet, a pasted diff's "--- a/file") isn't parsed as a flag. Without it
+      set-buffer fails and paste-buffer silently re-sends the PREVIOUS message.
+    """
+    buf = f"p2c-{uuid.uuid4().hex[:8]}"
+    subprocess.run([TMUX, "set-buffer", "-b", buf, "--", message])
+    subprocess.run([TMUX, "paste-buffer", "-d", "-b", buf, "-t", session])
+    threading.Event().wait(delay)
+    subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+
+
+# Claude Code's TUI is ready for input once it has painted its prompt box. The
+# footer is the surest marker (we always launch with --dangerously-skip-permissions,
+# so the bypass line is always there); the bare "❯" is a fallback.
+CLAUDE_READY_RE = re.compile(r"bypass permissions|Try \"|^❯", re.M)
+
+
+def wait_for_claude_ready(session, timeout=60):
+    """Block until a freshly-spawned Claude Code session can actually accept a
+    message. Pasting into a TUI that's still booting silently drops the text —
+    which is easy to hit on a cold tmux server, where startup is slowest."""
+    deadline = datetime.now().timestamp() + timeout
+    while datetime.now().timestamp() < deadline:
+        if CLAUDE_READY_RE.search(capture_session_pane(session)):
+            threading.Event().wait(1.0)  # let the input box settle before typing
+            return True
+        threading.Event().wait(0.5)
+    return False
+
+
+def spawn_claude_tmux(session, cwd):
+    """Launch a detached Claude Code session in `cwd`. No-ops if it already exists."""
+    if _tmux_has_session(session):
         return False
 
-    cwd = os.path.expanduser(project_path) if project_path else os.path.expanduser("~")
     if not os.path.isdir(cwd):
         os.makedirs(cwd, exist_ok=True)
     cmd = f"cd {cwd} && {CLAUDE_BIN} --dangerously-skip-permissions"
@@ -232,6 +288,11 @@ def start_session(pid, project_path=None):
     subprocess.run([TMUX, "resize-window", "-t", session, "-x", "120", "-y", "200"])
     threading.Event().wait(2)
     return True
+
+
+def start_session(pid, project_path=None):
+    cwd = os.path.expanduser(project_path) if project_path else os.path.expanduser("~")
+    return spawn_claude_tmux(session_name(pid), cwd)
 
 
 def open_terminal_window(pid):
@@ -391,11 +452,7 @@ def send_to_session(pid, message, reply_id, project_name, notify=True):
         update_message(pid, reply_id, {"text": "Session not running. Start it first.", "status": "done"})
         return
 
-    session = session_name(pid)
-    subprocess.run([TMUX, "set-buffer", "-t", session, message])
-    subprocess.run([TMUX, "paste-buffer", "-t", session])
-    threading.Event().wait(0.3)
-    subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+    paste_into_session(session_name(pid), message)
     threading.Event().wait(2)
 
     text = wait_for_stable_reply(pid, message)
@@ -1090,6 +1147,862 @@ def _council_loop(pid, path, diff_text, council, attempt):
     _council_loop(pid, path, new_diff, council, attempt + 1)
 
 
+# ── Split runs (parallel mini-agents, one git worktree each) ─────────────────
+# The normal chat drives ONE session through a task sequentially. For a big task
+# that decomposes cleanly, a split instead fans it out: a planner reads the repo
+# and proposes independent pieces, the user edits/approves them, and each piece
+# gets its own git worktree + branch + Claude Code tmux session. Every agent is a
+# full interactive session — same terminal mirror and input box as Chat — so the
+# user can correct any one of them mid-flight without touching the others. When
+# they're done the branches are merged back into the base branch together.
+
+SPLIT_ROOT = Path.home() / ".phone-to-claude-splits"
+SPLIT_MAX_BRANCHES = 6
+SPLIT_DEFAULT_BRANCHES = 3
+SPLIT_CHECK_INTERVAL = 8    # seconds between agent-status sweeps
+SPLIT_IDLE_THRESHOLD = 45   # seconds of unchanged pane before an agent reads as idle
+
+# Statuses the status sweep is allowed to overwrite. Merge outcomes
+# (merged/conflict/empty) are decisions, not observations — they stick until the
+# next merge attempt re-decides them.
+SPLIT_LIVE_STATUSES = ("starting", "working", "idle", "stopped")
+
+SPLIT_PLAN_PROMPT = """You are planning how to split one large task across independent Claude Code agents that will work in PARALLEL — each in its own git worktree on its own branch of this project — whose branches are all merged back together at the end.
+
+The task:
+---
+{prompt}
+---
+
+First read enough of this project to understand how it's actually structured. Then split the task into independent pieces. Rules:
+- Each piece must be workable on its own, right now, without waiting on another piece.
+- Minimize file overlap. Two agents editing the same file means a merge conflict. If some shared file (a router, an index, a schema, a config) has to change, assign it to exactly ONE piece and tell the others not to touch it.
+- Aim for {count} pieces, but use fewer if the task doesn't honestly divide that far. Never more than {max}.
+- Each "task" is the ONLY thing its agent will be told, besides the repo itself. Write it as complete standalone instructions: what to build, where it goes, and how it meets the other pieces (names of functions/props/endpoints it should expose or assume).
+
+Reply with ONLY a JSON array and nothing else — no prose, no markdown fence:
+[{{"name": "short-kebab-name", "task": "full standalone instructions for this agent", "files": ["likely/path.js"]}}]"""
+
+SPLIT_AGENT_PROMPT = """You are agent {n} of {total} working in PARALLEL with other Claude Code agents on one larger task. You're in your own git worktree on branch `{branch}`; the others are in their own worktrees on their own branches, and all the branches get merged together once everyone is done.
+
+The overall goal, for context only:
+{overall}
+
+YOUR piece — the only piece you should implement:
+{task}
+{files_line}
+Rules:
+- Stay inside your piece. Do not implement the other agents' pieces, and avoid editing files outside yours: {others}
+- The other agents' work will NOT appear in your worktree. Don't wait for it. If your piece needs something they're building, code against the interface described above and move on.
+- Commit your work on this branch when it's done: `git add -A && git commit -m "..."` with a short message.
+- Finish by printing one line starting with "DONE:" and a one-sentence summary."""
+
+
+def split_path(pid):
+    return project_dir(pid) / "split.json"
+
+
+# Unlike the other state files, split.json has genuinely concurrent writers: the
+# status sweep, the agent-launch thread, and whatever the user just clicked. So
+# writes go through a temp file + atomic rename (a reader can never catch a
+# half-written file), and every read-modify-write holds the project's lock so one
+# update can't silently clobber another's.
+_split_locks = {}
+_split_locks_guard = threading.Lock()
+
+
+def split_lock(pid):
+    with _split_locks_guard:
+        return _split_locks.setdefault(pid, threading.RLock())
+
+
+def load_split(pid):
+    p = split_path(pid)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {"state": "idle", "run": None, "history": []}
+
+
+def save_split(pid, data):
+    p = split_path(pid)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, p)
+    broadcast_split(pid, data)
+
+
+def split_session_name(pid, bid):
+    return f"claude_split_{pid}_{bid}"
+
+
+def split_run_dir(pid, run_id):
+    meta = load_meta(pid) or {}
+    return SPLIT_ROOT / f"{slugify(meta.get('name', pid))}-{pid}" / run_id
+
+
+def _split_error(pid, message):
+    with split_lock(pid):
+        data = load_split(pid)
+        data["state"] = "idle" if not data.get("run") else data["state"]
+        data["error"] = message
+        save_split(pid, data)
+        return data
+
+
+def split_preflight(pid):
+    """(path, base_branch, base_sha, error). A split needs a git repo with at
+    least one commit — worktrees branch off HEAD."""
+    meta = load_meta(pid) or {}
+    path = meta.get("path")
+    if not path or not os.path.isdir(path):
+        return None, None, None, "Project folder not found."
+    if not is_git_repo(path):
+        return None, None, None, "This project isn't a git repo. Run `git init` in the project folder to use splits."
+    head = _git(path, "rev-parse", "HEAD")
+    if head.returncode != 0:
+        return None, None, None, "This repo has no commits yet. Make one commit, then split."
+    branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "HEAD"
+    return path, branch, head.stdout.strip(), None
+
+
+def _parse_plan_json(out):
+    """Pull the JSON array out of a planner reply, tolerating a stray fence or
+    a sentence of preamble."""
+    text = out.strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        return []
+    try:
+        items = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return []
+    branches = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        task = str(item.get("task") or "").strip()
+        if not name or not task:
+            continue
+        files = [str(f) for f in (item.get("files") or []) if isinstance(f, (str, int))][:12]
+        branches.append({"name": name, "task": task, "files": files})
+    return branches[:SPLIT_MAX_BRANCHES]
+
+
+def plan_split(pid, prompt, count):
+    path, base_branch, base_sha, err = split_preflight(pid)
+    if err:
+        return _split_error(pid, err)
+
+    with split_lock(pid):
+        data = load_split(pid)
+        data.update({"state": "planning", "error": "", "prompt": prompt, "run": None})
+        save_split(pid, data)
+
+    planner = SPLIT_PLAN_PROMPT.format(prompt=prompt, count=count, max=SPLIT_MAX_BRANCHES)
+    try:
+        result = subprocess.run(
+            [CLAUDE_BIN, "-p", planner, "--dangerously-skip-permissions"],
+            cwd=path, capture_output=True, text=True, timeout=420,
+        )
+        branches = _parse_plan_json(result.stdout)
+    except Exception as e:
+        return _split_error(pid, f"Planner failed: {e}")
+
+    if not branches:
+        return _split_error(pid, "The planner didn't return a usable split. Try rewording the task.")
+
+    with split_lock(pid):
+        data = load_split(pid)
+        data.update({
+            "state": "planned",
+            "error": "",
+            "prompt": prompt,
+            "proposed": branches,
+            "base_branch": base_branch,
+            "base_sha": base_sha,
+        })
+        save_split(pid, data)
+        return data
+
+
+def _unique_slugs(names):
+    slugs, seen = [], set()
+    for name in names:
+        base = slugify(name)[:32] or "branch"
+        slug, n = base, 2
+        while slug in seen:
+            slug = f"{base}-{n}"
+            n += 1
+        seen.add(slug)
+        slugs.append(slug)
+    return slugs
+
+
+def launch_split(pid, prompt, branches):
+    path, base_branch, base_sha, err = split_preflight(pid)
+    if err:
+        return _split_error(pid, err)
+
+    # One run at a time. Overwriting a live run would strand its worktrees and
+    # tmux sessions with nothing left pointing at them to clean up.
+    if (load_split(pid) or {}).get("run"):
+        return _split_error(pid, "A split run is already open — close it before starting another.")
+
+    branches = [b for b in branches if (b.get("name") or "").strip() and (b.get("task") or "").strip()]
+    if len(branches) < 2:
+        return _split_error(pid, "A split needs at least 2 branches.")
+    branches = branches[:SPLIT_MAX_BRANCHES]
+
+    run_id = uuid.uuid4().hex[:6]
+    run_dir = split_run_dir(pid, run_id)
+    slugs = _unique_slugs([b["name"] for b in branches])
+
+    entries = []
+    for i, (b, slug) in enumerate(zip(branches, slugs), start=1):
+        entries.append({
+            "id": f"{run_id}{i}",
+            "n": i,
+            "name": b["name"].strip(),
+            "slug": slug,
+            "task": b["task"].strip(),
+            "files": b.get("files") or [],
+            "branch": f"split/{run_id}/{slug}",
+            "worktree": str(run_dir / slug),
+            "status": "starting",
+            "changed_files": [],
+            "note": "",
+        })
+
+    run = {
+        "id": run_id,
+        "prompt": prompt,
+        "base_branch": base_branch,
+        "base_sha": base_sha,
+        "started": datetime.now().isoformat(),
+        "merged": None,
+        "branches": entries,
+    }
+    with split_lock(pid):
+        data = load_split(pid)
+        data.update({"state": "running", "error": "", "prompt": prompt, "run": run, "proposed": [], "needs_base_commit": []})
+        save_split(pid, data)
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            r = _git(path, "worktree", "add", "-b", entry["branch"], entry["worktree"], base_sha)
+            if r.returncode != 0:
+                entry["status"] = "stopped"
+                entry["note"] = f"Couldn't create worktree: {r.stderr.strip()[:300]}"
+        save_split(pid, data)
+
+    threading.Thread(target=_start_split_agents, args=(pid, run["id"]), daemon=True).start()
+    return data
+
+
+def _brief_landed(session, marker, timeout=12):
+    """Confirm a submitted message actually reached the TUI — it echoes the text
+    into its transcript, so the branch name showing up means it took."""
+    deadline = datetime.now().timestamp() + timeout
+    while datetime.now().timestamp() < deadline:
+        if marker in capture_session_pane(session):
+            return True
+        threading.Event().wait(0.5)
+    return False
+
+
+def _start_split_agents(pid, run_id):
+    """Boot each agent's session and hand it its brief.
+
+    Sessions are created first, in one pass, so they all boot concurrently — then
+    each is briefed once its TUI is actually up. (Creation stays sequential and
+    blocking: tmux session creation racing itself on a cold server is the failure
+    start_session()'s blocking run() exists to avoid.)"""
+    data = load_split(pid)
+    run = data.get("run") or {}
+    if run.get("id") != run_id:
+        return
+    entries = [e for e in run["branches"] if e["status"] != "stopped"]
+    total = len(entries)
+
+    for entry in entries:
+        spawn_claude_tmux(split_session_name(pid, entry["id"]), entry["worktree"])
+
+    for entry in entries:
+        names = [e["name"] for e in entries if e["id"] != entry["id"]]
+        files_line = ("\nFiles you'll most likely be working in: " + ", ".join(entry["files"]) + "\n") if entry["files"] else ""
+        brief = SPLIT_AGENT_PROMPT.format(
+            n=entry["n"], total=total, branch=entry["branch"], overall=run["prompt"],
+            task=entry["task"], files_line=files_line,
+            others=", ".join(names) if names else "(none)",
+        )
+        session = split_session_name(pid, entry["id"])
+        # Waiting and pasting are slow (seconds each) — deliberately outside the
+        # lock, so a merge or a correction the user fires meanwhile isn't blocked.
+        wait_for_claude_ready(session)
+        paste_into_session(session, brief)
+        if not _brief_landed(session, entry["branch"]):
+            # Belt and braces: an agent that silently never received its brief
+            # just sits at an empty prompt looking "idle", which is the one
+            # failure the user can't tell apart from "finished already".
+            paste_into_session(session, brief)
+            if not _brief_landed(session, entry["branch"]):
+                entry["note"] = "Couldn't confirm this agent received its brief — check its terminal."
+        entry["status"] = "working"
+
+        with split_lock(pid):
+            data = load_split(pid)
+            if (data.get("run") or {}).get("id") != run_id:
+                return  # run was cleaned up under us
+            for e in data["run"]["branches"]:
+                if e["id"] == entry["id"]:
+                    e["status"] = "working"
+                    e["note"] = entry.get("note", "")
+            save_split(pid, data)
+
+
+def split_branch_files(entry, base_sha):
+    """Everything this agent has touched — committed on its branch plus whatever
+    is still uncommitted in its worktree."""
+    wt = entry["worktree"]
+    if not os.path.isdir(wt):
+        return []
+    files = set()
+    committed = _git(wt, "diff", "--name-only", base_sha)
+    if committed.returncode == 0:
+        files.update(f for f in committed.stdout.splitlines() if f.strip())
+    status = _git(wt, "status", "--porcelain")
+    if status.returncode == 0:
+        files.update(line[3:].strip() for line in status.stdout.splitlines() if line[3:].strip())
+    return sorted(files)[:40]
+
+
+_split_pane_watch = {}  # "pid:bid" -> {"body": str, "changed_at": float}
+
+
+def _split_tick():
+    """Keep each agent's live status (working / idle / stopped) and touched-file
+    list current, using the same stable-pane diffing as the blocked watchdog.
+
+    Observations (pane captures, git calls) are gathered WITHOUT the project lock
+    since they're slow, then applied to a freshly-reloaded copy under it — so a
+    merge or cleanup landing mid-sweep wins instead of being overwritten by
+    readings taken before it happened."""
+    now = datetime.now().timestamp()
+    seen = set()
+    for meta in all_projects():
+        pid = meta["id"]
+        data = load_split(pid)
+        run = data.get("run")
+        if not run or data.get("state") not in ("running", "merging", "merged", "conflict"):
+            continue
+
+        observed = {}
+        for entry in run["branches"]:
+            key = f"{pid}:{entry['id']}"
+            seen.add(key)
+            files = split_branch_files(entry, run["base_sha"])
+            status = None
+
+            if entry["status"] in SPLIT_LIVE_STATUSES:
+                session = split_session_name(pid, entry["id"])
+                if not _tmux_has_session(session):
+                    status = "stopped"
+                else:
+                    body = pane_body(capture_session_pane(session))
+                    with _lock:
+                        prev = _split_pane_watch.get(key)
+                        if prev is None or prev["body"] != body:
+                            _split_pane_watch[key] = {"body": body, "changed_at": now}
+                            idle_for = 0
+                        else:
+                            idle_for = now - prev["changed_at"]
+                    status = "idle" if idle_for >= SPLIT_IDLE_THRESHOLD else "working"
+            observed[entry["id"]] = (status, files)
+
+        with split_lock(pid):
+            fresh = load_split(pid)
+            fresh_run = fresh.get("run")
+            if not fresh_run or fresh_run["id"] != run["id"]:
+                continue  # run was replaced or cleaned up while we looked
+            dirty = False
+            for entry in fresh_run["branches"]:
+                status, files = observed.get(entry["id"], (None, None))
+                if files is not None and files != entry.get("changed_files"):
+                    entry["changed_files"] = files
+                    dirty = True
+                # Re-check against the fresh copy: a merge may have moved this
+                # branch to a terminal status since the reading was taken.
+                if status and entry["status"] in SPLIT_LIVE_STATUSES and status != entry["status"]:
+                    entry["status"] = status
+                    dirty = True
+            if dirty:
+                save_split(pid, fresh)
+
+    with _lock:
+        for key in list(_split_pane_watch):
+            if key not in seen:
+                del _split_pane_watch[key]
+
+
+def split_monitor():
+    while True:
+        try:
+            _split_tick()
+        except Exception as e:
+            print(f"[split-monitor] error: {e}")
+        threading.Event().wait(SPLIT_CHECK_INTERVAL)
+
+
+def merge_split(pid, commit_base=False):
+    """Commit each agent's leftover work, then merge the branches into the base
+    branch one at a time. Stops at the first conflict with the conflicted files
+    named, so the user can send that one agent a fix instead of untangling a
+    half-merged tree."""
+    with split_lock(pid):
+        return _merge_split_locked(pid, commit_base)
+
+
+def _merge_split_locked(pid, commit_base):
+    data = load_split(pid)
+    run = data.get("run")
+    if not run:
+        return _split_error(pid, "No split run to merge.")
+
+    path = (load_meta(pid) or {}).get("path")
+    if not path or not is_git_repo(path):
+        return _split_error(pid, "Project folder is no longer a git repo.")
+
+    # git merge lands on whatever HEAD currently is. If the working tree moved to
+    # another branch since launch, merging would dump every agent's work onto the
+    # wrong branch — so require the base branch back before touching anything.
+    current = _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if current != run["base_branch"]:
+        return _split_error(
+            pid,
+            f"This split branched off `{run['base_branch']}`, but the project is now on "
+            f"`{current}`. Switch back to `{run['base_branch']}` before merging.",
+        )
+
+    # A merge into a dirty base would mix the user's own uncommitted work into
+    # the merge commit (or just be refused by git), so it's opt-in.
+    status = _git(path, "status", "--porcelain")
+    base_dirty = [line[3:].strip() for line in status.stdout.splitlines() if line[3:].strip()]
+    if base_dirty:
+        if not commit_base:
+            data["error"] = ""
+            data["needs_base_commit"] = base_dirty[:40]
+            save_split(pid, data)
+            return data
+        _git(path, "add", "-A")
+        _git(path, "commit", "-m", "Snapshot before merging split branches")
+    data["needs_base_commit"] = []
+
+    data["state"] = "merging"
+    data["error"] = ""
+    save_split(pid, data)
+
+    for entry in run["branches"]:
+        if entry["status"] == "merged":
+            continue
+        wt = entry["worktree"]
+        if not os.path.isdir(wt):
+            entry["status"] = "empty"
+            entry["note"] = "Worktree is gone — nothing to merge."
+            continue
+
+        if _git(wt, "status", "--porcelain").stdout.strip():
+            _git(wt, "add", "-A")
+            _git(wt, "commit", "-m", f"split({entry['slug']}): agent work")
+
+        ahead = _git(path, "rev-list", "--count", f"{run['base_branch']}..{entry['branch']}")
+        if ahead.stdout.strip() in ("", "0"):
+            entry["status"] = "empty"
+            entry["note"] = "This agent didn't commit any changes."
+            continue
+
+        r = _git(path, "merge", "--no-ff", entry["branch"], "-m",
+                 f"Merge split branch {entry['slug']} ({entry['name']})")
+        if r.returncode == 0:
+            entry["status"] = "merged"
+            entry["note"] = ""
+            continue
+
+        conflicts = _git(path, "diff", "--name-only", "--diff-filter=U").stdout.split()
+        _git(path, "merge", "--abort")
+        entry["status"] = "conflict"
+        entry["conflicts"] = conflicts[:40]
+        entry["note"] = (r.stdout + r.stderr).strip()[:400]
+        data["state"] = "conflict"
+        save_split(pid, data)
+        return data
+
+    run["merged"] = datetime.now().isoformat()
+    data["state"] = "merged"
+    save_split(pid, data)
+    return data
+
+
+REBASE_PROMPT = """Your branch `{branch}` conflicts with the base branch `{base}` — the other agents' work landed there first, so your changes no longer apply cleanly.
+
+Conflicting files:
+{files}
+
+Please: `git fetch` isn't needed (same repo). Run `git merge {base}` here in your worktree, resolve the conflicts by hand — keeping BOTH your work and what's already on {base} — then commit the merge. Tell me "DONE:" when the worktree is clean and your work still does what it should."""
+
+
+def ask_branch_to_rebase(pid, bid):
+    with split_lock(pid):
+        data = load_split(pid)
+        run = data.get("run") or {}
+        entry = next((e for e in run.get("branches", []) if e["id"] == bid), None)
+        if not entry:
+            return None
+        session = split_session_name(pid, bid)
+        if not _tmux_has_session(session):
+            return None
+        files = "\n".join(f"- {f}" for f in entry.get("conflicts", [])) or "(see git status)"
+        paste_into_session(session, REBASE_PROMPT.format(
+            branch=entry["branch"], base=run.get("base_branch", "main"), files=files))
+        entry["status"] = "working"
+        if data.get("state") == "conflict":
+            data["state"] = "running"
+        save_split(pid, data)
+        return data
+
+
+def cleanup_split(pid, delete_branches=False):
+    """Tear down the run: kill the agent sessions, remove the worktrees, and file
+    the run under history. Branches are kept by default — merged work lives on
+    the base branch, but an unmerged branch is the only copy of that agent's
+    work, so deleting it is opt-in."""
+    with split_lock(pid):
+        return _cleanup_split_locked(pid, delete_branches)
+
+
+def _cleanup_split_locked(pid, delete_branches):
+    data = load_split(pid)
+    run = data.get("run")
+    if not run:
+        data.update({"state": "idle", "proposed": [], "error": ""})
+        save_split(pid, data)
+        return data
+    path = (load_meta(pid) or {}).get("path")
+
+    for entry in run["branches"]:
+        session = split_session_name(pid, entry["id"])
+        if _tmux_has_session(session):
+            subprocess.run([TMUX, "kill-session", "-t", session])
+        if path and is_git_repo(path):
+            _git(path, "worktree", "remove", "--force", entry["worktree"])
+            if delete_branches:
+                _git(path, "branch", "-D", entry["branch"])
+    if path and is_git_repo(path):
+        _git(path, "worktree", "prune")
+
+    # Tidy the now-empty run/project scratch dirs. rmdir (not rmtree) on purpose:
+    # it fails harmlessly if anything is left, so a worktree that didn't come off
+    # cleanly keeps its files rather than being silently deleted.
+    if run["branches"]:
+        run_dir = Path(run["branches"][0]["worktree"]).parent
+        for d in (run_dir, run_dir.parent):
+            try:
+                d.rmdir()
+            except OSError:
+                break
+
+    run["closed"] = datetime.now().isoformat()
+    run["final_state"] = data.get("state")
+    data.setdefault("history", []).insert(0, run)
+    data["history"] = data["history"][:10]
+    data.update({"state": "idle", "run": None, "proposed": [], "error": "", "needs_base_commit": []})
+    save_split(pid, data)
+    return data
+
+
+def kill_split_sessions(pid):
+    """Stop a project's agent sessions without tearing the worktrees down — used
+    by Close All and server shutdown, where the run should survive to be resumed."""
+    run = (load_split(pid) or {}).get("run")
+    for entry in (run or {}).get("branches", []):
+        session = split_session_name(pid, entry["id"])
+        if _tmux_has_session(session):
+            subprocess.run([TMUX, "kill-session", "-t", session])
+
+
+# ── Daily report ─────────────────────────────────────────────────────────────
+# Close All already asks every live session for a handoff summary before killing
+# it. That's the raw material for a day's report: gather each project touched
+# today (the ones just closed, plus any paused earlier or auto-paused by the
+# limit watchdog), render it to a PDF via the Chrome that's already used for
+# screenshot tests, and email it as an attachment.
+
+REPORTS_DIR = DATA_DIR.parent / "reports"
+EMAIL_CONFIG_PATH = DATA_DIR.parent / ".email_config"
+
+
+def load_email_config():
+    """{smtp_user, smtp_pass, to, smtp_host?, smtp_port?} or None if unconfigured.
+    Absent config is a normal state, not an error — the report is still built and
+    saved to disk, just not mailed."""
+    if not EMAIL_CONFIG_PATH.exists():
+        return None
+    try:
+        cfg = json.loads(EMAIL_CONFIG_PATH.read_text())
+    except json.JSONDecodeError:
+        return None
+    if not cfg.get("smtp_user") or not cfg.get("smtp_pass"):
+        return None
+    cfg.setdefault("to", cfg["smtp_user"])
+    cfg.setdefault("smtp_host", "smtp.gmail.com")
+    cfg.setdefault("smtp_port", 465)
+    return cfg
+
+
+def _is_today(iso, today=None):
+    if not iso:
+        return False
+    today = today or datetime.now().date()
+    try:
+        return datetime.fromisoformat(iso).date() == today
+    except (ValueError, TypeError):
+        return False
+
+
+def collect_day_activity(pid, today=None):
+    """What this project did today, or None if it did nothing.
+
+    Activity is judged from recorded timestamps only — meta's `last_activity` and
+    the message log — never from file mtimes. Every path that writes a session
+    summary (Close All, the limit watchdog) goes through send_to_session, which
+    stamps last_activity, so mtime adds nothing but false positives: restoring a
+    backup or touching a file would otherwise resurrect a project into the
+    report. Close All additionally passes the sessions it just closed explicitly."""
+    today = today or datetime.now().date()
+    meta = load_meta(pid)
+    if not meta:
+        return None
+
+    msgs = load_messages(pid)
+    today_msgs = [m for m in msgs if _is_today(m.get("timestamp"), today)]
+    touched = bool(today_msgs) or _is_today(meta.get("last_activity"), today)
+
+    if not touched:
+        return None
+
+    mem = get_memory(pid)["memory"]
+    summary = (mem.get("last_session") or "").strip()
+
+    times = sorted(m["timestamp"] for m in today_msgs if m.get("timestamp"))
+    council = load_council(pid)
+    council_runs = [r for r in council.get("runs", []) if _is_today(r.get("started"), today)]
+    split = load_split(pid)
+    splits = [r for r in ([split["run"]] if split.get("run") else []) + split.get("history", [])
+              if _is_today(r.get("started"), today)]
+
+    return {
+        "id": pid,
+        "name": meta.get("name", pid),
+        "emoji": meta.get("emoji", "📁"),
+        "description": meta.get("description", ""),
+        "summary": summary,
+        "errors": (mem.get("errors") or "").strip(),
+        "messages": len(today_msgs),
+        "first": times[0] if times else None,
+        "last": times[-1] if times else None,
+        "limit_paused": bool(meta.get("limit_paused")),
+        "council": {
+            "runs": len(council_runs),
+            "approved": sum(1 for r in council_runs if r.get("approved")),
+        } if council_runs else None,
+        "splits": [{
+            "branches": [b["name"] for b in s.get("branches", [])],
+            "merged": bool(s.get("merged")),
+        } for s in splits],
+    }
+
+
+def _fmt_time(iso):
+    try:
+        return datetime.fromisoformat(iso).strftime("%-I:%M %p")
+    except (ValueError, TypeError):
+        return ""
+
+
+def build_report_html(projects, day=None):
+    day = day or datetime.now()
+    esc = lambda s: (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    total_msgs = sum(p["messages"] for p in projects)
+
+    cards = []
+    for p in projects:
+        meta_bits = []
+        if p["first"] and p["last"]:
+            meta_bits.append(f"{_fmt_time(p['first'])} – {_fmt_time(p['last'])}")
+        if p["messages"]:
+            meta_bits.append(f"{p['messages']} message{'s' if p['messages'] != 1 else ''}")
+        if p["limit_paused"]:
+            meta_bits.append("paused for usage limit")
+
+        extras = ""
+        if p["council"]:
+            c = p["council"]
+            extras += (f"<div class='extra'><b>Council:</b> {c['approved']}/{c['runs']} "
+                       f"review{'s' if c['runs'] != 1 else ''} approved</div>")
+        for s in p["splits"]:
+            extras += (f"<div class='extra'><b>Split:</b> {', '.join(esc(b) for b in s['branches'])}"
+                       f" — {'merged' if s['merged'] else 'not merged'}</div>")
+        if p["errors"]:
+            extras += f"<div class='extra errors'><b>Open problems:</b> {esc(p['errors'][:600])}</div>"
+
+        summary = esc(p["summary"]) or "<i>No summary was saved for this session.</i>"
+        cards.append(f"""
+      <section class="project">
+        <h2><span class="emoji">{esc(p['emoji'])}</span> {esc(p['name'])}</h2>
+        <div class="meta">{esc(' · '.join(meta_bits)) or 'No message activity recorded'}</div>
+        <div class="summary">{summary}</div>
+        {extras}
+      </section>""")
+
+    body = "".join(cards) or "<section class='project'><div class='meta'>No project activity recorded today.</div></section>"
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Daily report</title><style>
+  @page {{ size: letter; margin: 16mm 14mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+         color: #1a1a24; font-size: 11pt; line-height: 1.55; margin: 0; }}
+  header {{ border-bottom: 3px solid #7c5cfc; padding-bottom: 12px; margin-bottom: 22px; }}
+  h1 {{ font-size: 21pt; margin: 0 0 4px; letter-spacing: -0.4px; }}
+  .day {{ color: #6b6b80; font-size: 10.5pt; }}
+  .totals {{ margin-top: 10px; font-size: 10.5pt; color: #4a4a5c; }}
+  .totals b {{ color: #7c5cfc; }}
+  .project {{ page-break-inside: avoid; border: 1px solid #e2e2ec; border-radius: 10px;
+              padding: 14px 16px; margin-bottom: 14px; }}
+  h2 {{ font-size: 13pt; margin: 0 0 3px; }}
+  .emoji {{ margin-right: 5px; }}
+  .meta {{ color: #6b6b80; font-size: 9.5pt; margin-bottom: 9px; }}
+  .summary {{ white-space: pre-wrap; }}
+  .extra {{ margin-top: 9px; padding-top: 8px; border-top: 1px solid #eeeef4;
+            font-size: 10pt; color: #4a4a5c; }}
+  .extra.errors {{ color: #a13030; }}
+  footer {{ margin-top: 20px; color: #9b9bb2; font-size: 9pt;
+            border-top: 1px solid #e2e2ec; padding-top: 10px; }}
+</style></head><body>
+  <header>
+    <h1>Daily report</h1>
+    <div class="day">{day.strftime('%A, %B %-d, %Y')}</div>
+    <div class="totals">
+      <b>{len(projects)}</b> project{'s' if len(projects) != 1 else ''} worked on
+      · <b>{total_msgs}</b> message{'s' if total_msgs != 1 else ''} exchanged
+    </div>
+  </header>
+  {body}
+  <footer>Generated by Claude Manager at {day.strftime('%-I:%M %p')} — summaries are each session's own handoff notes.</footer>
+</body></html>"""
+
+
+def render_pdf(html, out_path):
+    """HTML → PDF through the same Chrome the screenshot tests already shell out
+    to, so this adds no new dependency."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    src = out_path.with_suffix(".html")
+    src.write_text(html)
+    try:
+        subprocess.run(
+            [CHROME_BIN, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
+             f"--print-to-pdf={out_path}", src.as_uri()],
+            capture_output=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return out_path.exists() and out_path.stat().st_size > 0
+
+
+def send_report_email(pdf_path, projects, day=None):
+    """(sent, detail). Never raises — a failed send must not take down Close All."""
+    cfg = load_email_config()
+    if not cfg:
+        return False, f"No email configured ({EMAIL_CONFIG_PATH.name} missing) — report saved to disk only."
+
+    import smtplib
+    from email.message import EmailMessage
+
+    day = day or datetime.now()
+    names = ", ".join(p["name"] for p in projects) or "no active projects"
+    msg = EmailMessage()
+    msg["Subject"] = f"Your day in code — {day.strftime('%a %b %-d')}"
+    msg["From"] = cfg["smtp_user"]
+    msg["To"] = cfg["to"]
+    lines = [f"Here's what you got done on {day.strftime('%A, %B %-d')}.", "", f"Projects: {names}", ""]
+    for p in projects:
+        lines.append(f"— {p['emoji']} {p['name']}")
+        if p["summary"]:
+            lines.append(f"   {' '.join(p['summary'].split())[:300]}")
+        lines.append("")
+    lines.append("Full report attached as a PDF.")
+    msg.set_content("\n".join(lines))
+
+    try:
+        msg.add_attachment(Path(pdf_path).read_bytes(), maintype="application",
+                           subtype="pdf", filename=Path(pdf_path).name)
+        with smtplib.SMTP_SSL(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=45) as s:
+            s.login(cfg["smtp_user"], cfg["smtp_pass"])
+            s.send_message(msg)
+        return True, f"Emailed to {cfg['to']}"
+    except Exception as e:
+        return False, f"Email failed: {type(e).__name__}: {e}"
+
+
+def build_and_send_daily_report(extra_pids=None):
+    """Gather today's work, render the PDF, mail it. `extra_pids` forces projects
+    in even if the activity check misses them — Close All passes the sessions it
+    just closed, which are the whole point of the report."""
+    today = datetime.now().date()
+    forced = set(extra_pids or [])
+    projects = []
+    for meta in all_projects():
+        entry = collect_day_activity(meta["id"], today)
+        if entry is None and meta["id"] in forced:
+            entry = {**{
+                "id": meta["id"], "name": meta.get("name", meta["id"]),
+                "emoji": meta.get("emoji", "📁"), "description": meta.get("description", ""),
+                "summary": "", "errors": "", "messages": 0, "first": None, "last": None,
+                "limit_paused": False, "council": None, "splits": [],
+            }}
+        if entry:
+            projects.append(entry)
+    projects.sort(key=lambda p: (p["last"] or ""), reverse=True)
+
+    now = datetime.now()
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    pdf_path = REPORTS_DIR / f"daily-report-{now:%Y-%m-%d}.pdf"
+    html = build_report_html(projects, now)
+
+    if not projects:
+        # Nothing happened today — an empty report in the inbox is just noise.
+        detail = "No project activity today — no report sent."
+        print(f"[daily-report] {detail}")
+        return {"ok": True, "emailed": False, "detail": detail, "projects": 0, "pdf": ""}
+
+    if not render_pdf(html, pdf_path):
+        result = {"ok": False, "detail": "Couldn't render the PDF.", "projects": len(projects)}
+        print(f"[daily-report] {result['detail']}")
+        return result
+
+    sent, detail = send_report_email(pdf_path, projects, now)
+    print(f"[daily-report] {len(projects)} project(s) — {detail}")
+    return {"ok": True, "emailed": sent, "detail": detail,
+            "projects": len(projects), "pdf": str(pdf_path)}
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/projects")
@@ -1254,13 +2167,43 @@ def _close_all_sessions():
         threads.append(t)
     for t in threads:
         t.join(timeout=130)
+    # Split agents get no handoff summary — their brief and their branch survive
+    # in split.json/git, so a Restart in the Split tab picks the work back up.
+    for p in all_projects():
+        kill_split_sessions(p["id"])
     return running
 
 
 @app.route("/api/close-all", methods=["POST"])
 def close_all():
     saved = _close_all_sessions()
-    return jsonify({"ok": True, "saved": [p["id"] for p in saved]})
+    # Runs inline rather than in a thread: the summaries it reads were only just
+    # written by _close_all_sessions, and the modal wants to show the outcome.
+    report = build_and_send_daily_report(extra_pids=[p["id"] for p in saved])
+    return jsonify({"ok": True, "saved": [p["id"] for p in saved], "report": report})
+
+
+@app.route("/api/daily-report", methods=["POST"])
+def daily_report():
+    """Send today's report without closing anything — for a re-send, or a look at
+    the day so far."""
+    return jsonify(build_and_send_daily_report())
+
+
+@app.route("/api/daily-report/preview")
+def daily_report_preview():
+    """The report as HTML, for checking how it reads before it goes out."""
+    today = datetime.now().date()
+    projects = [e for e in (collect_day_activity(m["id"], today) for m in all_projects()) if e]
+    projects.sort(key=lambda p: (p["last"] or ""), reverse=True)
+    return Response(build_report_html(projects), mimetype="text/html")
+
+
+@app.route("/api/email-config")
+def email_config_status():
+    cfg = load_email_config()
+    return jsonify({"configured": bool(cfg), "to": cfg["to"] if cfg else "",
+                    "path": str(EMAIL_CONFIG_PATH)})
 
 
 @app.route("/api/projects/<pid>/upload", methods=["POST"])
@@ -1475,11 +2418,7 @@ def send_message(pid):
     if not session_running(pid):
         return jsonify({"error": "Session not running"}), 400
 
-    session = session_name(pid)
-    subprocess.run([TMUX, "set-buffer", "-t", session, text])
-    subprocess.run([TMUX, "paste-buffer", "-t", session])
-    threading.Event().wait(0.1)
-    subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+    paste_into_session(session_name(pid), text, delay=0.1)
 
     name = (load_meta(pid) or {}).get("name", pid)
 
@@ -1532,6 +2471,143 @@ def council_stream(pid):
             with _lock:
                 try:
                     _council_listeners[pid].remove(queue)
+                except ValueError:
+                    pass
+
+    return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/projects/<pid>/split")
+def get_split(pid):
+    data = load_split(pid)
+    path, base_branch, _, err = split_preflight(pid)
+    data["can_split"] = err is None
+    data["blocker"] = err or ""
+    data["base_branch"] = base_branch or data.get("base_branch", "")
+    return jsonify(data)
+
+
+@app.route("/api/projects/<pid>/split/plan", methods=["POST"])
+def plan_split_route(pid):
+    body = request.get_json() or {}
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Describe the task to split first."}), 400
+    count = max(2, min(int(body.get("count") or SPLIT_DEFAULT_BRANCHES), SPLIT_MAX_BRANCHES))
+    threading.Thread(target=plan_split, args=(pid, prompt, count), daemon=True).start()
+    return jsonify({"status": "planning"})
+
+
+@app.route("/api/projects/<pid>/split/launch", methods=["POST"])
+def launch_split_route(pid):
+    body = request.get_json() or {}
+    branches = body.get("branches") or []
+    prompt = (body.get("prompt") or load_split(pid).get("prompt") or "").strip()
+    return jsonify(launch_split(pid, prompt, branches))
+
+
+@app.route("/api/projects/<pid>/split/merge", methods=["POST"])
+def merge_split_route(pid):
+    body = request.get_json() or {}
+    return jsonify(merge_split(pid, commit_base=bool(body.get("commit_base"))))
+
+
+@app.route("/api/projects/<pid>/split/cleanup", methods=["POST"])
+def cleanup_split_route(pid):
+    body = request.get_json() or {}
+    return jsonify(cleanup_split(pid, delete_branches=bool(body.get("delete_branches"))))
+
+
+def _split_branch(pid, bid):
+    run = (load_split(pid) or {}).get("run") or {}
+    return next((e for e in run.get("branches", []) if e["id"] == bid), None)
+
+
+@app.route("/api/projects/<pid>/split/branches/<bid>/message", methods=["POST"])
+def split_branch_message(pid, bid):
+    entry = _split_branch(pid, bid)
+    if not entry:
+        return jsonify({"error": "Not found"}), 404
+    text = ((request.get_json() or {}).get("message") or "").strip()
+    if not text:
+        return jsonify({"error": "No message"}), 400
+    session = split_session_name(pid, bid)
+    if not _tmux_has_session(session):
+        return jsonify({"error": "This agent's session isn't running"}), 400
+    paste_into_session(session, text, delay=0.1)
+    return jsonify({"status": "sent"})
+
+
+@app.route("/api/projects/<pid>/split/branches/<bid>/rebase", methods=["POST"])
+def split_branch_rebase(pid, bid):
+    data = ask_branch_to_rebase(pid, bid)
+    if data is None:
+        return jsonify({"error": "Agent session isn't running"}), 400
+    return jsonify(data)
+
+
+@app.route("/api/projects/<pid>/split/branches/<bid>/restart", methods=["POST"])
+def split_branch_restart(pid, bid):
+    """Bring a stopped agent back up in its existing worktree — its branch still
+    holds whatever it got done, so it picks up where it left off."""
+    entry = _split_branch(pid, bid)
+    if not entry:
+        return jsonify({"error": "Not found"}), 404
+    if not os.path.isdir(entry["worktree"]):
+        return jsonify({"error": "Worktree is gone"}), 400
+    spawn_claude_tmux(split_session_name(pid, bid), entry["worktree"])
+    with split_lock(pid):
+        data = load_split(pid)
+        for e in (data.get("run") or {}).get("branches", []):
+            if e["id"] == bid:
+                e["status"] = "idle"
+        save_split(pid, data)
+    return jsonify(data)
+
+
+@app.route("/api/projects/<pid>/split/branches/<bid>/terminal")
+def split_branch_terminal(pid, bid):
+    """Same live pane mirror as the main Chat tab, pointed at one agent."""
+    session = split_session_name(pid, bid)
+
+    def gen():
+        prev = ""
+        while True:
+            try:
+                if _tmux_has_session(session):
+                    current = capture_session_pane(session)
+                    if current != prev:
+                        prev = current
+                        yield f"data: {json.dumps({'content': current})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'content': '', 'offline': True})}\n\n"
+            except Exception:
+                pass
+            threading.Event().wait(0.3)
+
+    return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/projects/<pid>/split/stream")
+def split_stream(pid):
+    import queue as q_mod
+    queue = q_mod.Queue()
+    with _lock:
+        _split_listeners.setdefault(pid, []).append(queue)
+
+    def gen():
+        try:
+            yield f"data: {json.dumps(load_split(pid))}\n\n"
+            while True:
+                try:
+                    data = queue.get(timeout=30)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except Exception:
+                    yield ": ping\n\n"
+        finally:
+            with _lock:
+                try:
+                    _split_listeners[pid].remove(queue)
                 except ValueError:
                     pass
 
@@ -1847,7 +2923,8 @@ def _shutdown_once():
         return
     _shutdown_done = True
     running = get_running_sessions()
-    if not running:
+    splits = [p for p in all_projects() if (load_split(p["id"]).get("run") or {}).get("branches")]
+    if not running and not splits:
         return
     print(f"[shutdown] closing {len(running)} running session(s)...")
     _close_all_sessions()
@@ -1865,5 +2942,6 @@ if __name__ == "__main__":
     atexit.register(_shutdown_once)
     threading.Thread(target=limit_monitor, daemon=True).start()
     threading.Thread(target=blocked_monitor, daemon=True).start()
+    threading.Thread(target=split_monitor, daemon=True).start()
     print("Claude Manager backend running on http://0.0.0.0:8888")
     app.run(host="0.0.0.0", port=8888, debug=False, threaded=True)

@@ -391,6 +391,20 @@ textarea { resize: vertical; min-height: 80px; }
 .close-modal { width: 440px; }
 .close-modal-body { font-size: 14px; color: var(--text2); line-height: 1.5; }
 
+/* Daily-report outcome, shown once the sessions are closed */
+.report-note {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.report-note.sent { border-color: rgba(34,197,94,0.4); color: var(--green); }
+.report-path { margin-top: 4px; font-family: monospace; font-size: 11px; color: var(--text3); word-break: break-all; }
+
 .close-modal-list {
   list-style: none;
   margin: 16px 0 0;

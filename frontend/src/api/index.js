@@ -22,6 +22,10 @@ export const api = {
   pauseProject: (id) => fetch(`${BASE}/projects/${id}/pause`, { method: "POST" }).then(r => r.json()),
   closeAll: () => fetch(`${BASE}/close-all`, { method: "POST" }).then(r => r.json()),
 
+  // Daily report
+  getEmailConfig: () => fetch(`${BASE}/email-config`).then(r => r.json()),
+  sendDailyReport: () => fetch(`${BASE}/daily-report`, { method: "POST" }).then(r => r.json()),
+
   // Chat
   markSeen: (id) => fetch(`${BASE}/projects/${id}/seen`, { method: "POST" }).then(r => r.json()),
   getMessages: (id) => fetch(`${BASE}/projects/${id}/messages`).then(r => r.json()),
@@ -92,7 +96,25 @@ export const api = {
   // Council
   getCouncil: (id) => fetch(`${BASE}/projects/${id}/council`).then(r => r.json()),
   runCouncil: (id) => fetch(`${BASE}/projects/${id}/council/run`, { method: "POST" }).then(r => r.json()),
+
+  // Split (parallel mini-agents)
+  getSplit: (id) => fetch(`${BASE}/projects/${id}/split`).then(r => r.json()),
+  planSplit: (id, prompt, count) => post(`${BASE}/projects/${id}/split/plan`, { prompt, count }),
+  launchSplit: (id, prompt, branches) => post(`${BASE}/projects/${id}/split/launch`, { prompt, branches }),
+  mergeSplit: (id, commitBase = false) => post(`${BASE}/projects/${id}/split/merge`, { commit_base: commitBase }),
+  cleanupSplit: (id, deleteBranches = false) => post(`${BASE}/projects/${id}/split/cleanup`, { delete_branches: deleteBranches }),
+  splitBranchMessage: (id, bid, message) => post(`${BASE}/projects/${id}/split/branches/${bid}/message`, { message }),
+  splitBranchRebase: (id, bid) => post(`${BASE}/projects/${id}/split/branches/${bid}/rebase`, {}),
+  splitBranchRestart: (id, bid) => post(`${BASE}/projects/${id}/split/branches/${bid}/restart`, {}),
 };
+
+function post(url, body) {
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(r => r.json());
+}
 
 export const streamMessages = (projectId, onMessage) => {
   const es = new EventSource(`/api/projects/${projectId}/stream`);
@@ -105,6 +127,13 @@ export const streamRunning = (onUpdate) => {
   const es = new EventSource(`/api/running/stream`);
   es.onmessage = (e) => onUpdate(JSON.parse(e.data));
   es.onerror = () => { es.close(); setTimeout(() => streamRunning(onUpdate), 2000); };
+  return () => es.close();
+};
+
+export const streamSplit = (projectId, onUpdate) => {
+  const es = new EventSource(`/api/projects/${projectId}/split/stream`);
+  es.onmessage = (e) => onUpdate(JSON.parse(e.data));
+  es.onerror = () => { es.close(); setTimeout(() => streamSplit(projectId, onUpdate), 2000); };
   return () => es.close();
 };
 

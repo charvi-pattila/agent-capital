@@ -108,6 +108,37 @@ button { font-family: inherit; cursor: pointer; }
 }
 .chat-input:focus { border-color: var(--accent); }
 
+/* Split — the agent list sits beside the selected agent's live terminal.
+   Only the selected agent streams, so a 6-way split never opens 6 EventSources
+   (browsers cap concurrent HTTP/1.1 connections per host at 6, and the terminal
+   stream holds its connection open for as long as it's mounted). */
+.split-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.split-branch-list { display: flex; flex-direction: column; gap: 10px; }
+
+/* The plan editor's name row. The checkbox needs the same escape from the global
+   `input { width: 100% }` that .form-check and .import-row already make, or it
+   swallows the row and collapses the name field beside it. */
+.split-branch-head { display: flex; gap: 10px; align-items: center; }
+.split-branch-head input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.split-branch.active { border-color: var(--accent); background: var(--accent-soft); }
+.split-terminal { min-height: 460px; max-height: 70vh; }
+
+@media (max-width: 900px) {
+  .split-layout { grid-template-columns: 1fr; }
+  .split-terminal { min-height: 340px; }
+}
+
 /* Memory */
 .memory-panel { display: flex; flex-direction: column; gap: 24px; }
 .memory-section { display: flex; flex-direction: column; gap: 10px; }

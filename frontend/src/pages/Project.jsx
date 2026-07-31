@@ -7,8 +7,9 @@ import TestPanel from "../components/TestPanel";
 import PreviewPanel from "../components/PreviewPanel";
 import AboutPanel from "../components/AboutPanel";
 import CouncilPanel from "../components/CouncilPanel";
+import SplitPanel from "../components/SplitPanel";
 
-const TABS = ["Chat", "Memory", "Testing", "Preview", "Council", "About"];
+const TABS = ["Chat", "Split", "Memory", "Testing", "Preview", "Council", "About"];
 
 export default function Project() {
   const { id } = useParams();
@@ -77,6 +78,7 @@ export default function Project() {
 
       <div className="tab-content">
         {tab === "Chat" && <Chat projectId={id} status={status} />}
+        {tab === "Split" && <SplitPanel projectId={id} />}
         {tab === "Memory" && <MemoryPanel projectId={id} />}
         {tab === "Testing" && <TestPanel projectId={id} />}
         {tab === "Preview" && (
