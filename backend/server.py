@@ -46,7 +46,7 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 PROJECTS_BASE_DIR = Path.home() / "code" / "my-claude"
 PROJECTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# iMessage/SMS target for limit-resume alerts (E.164). Override with NOTIFY_PHONE env var.
+# iMessage/SMS target for limit-resume alerts (E.164). Set via NOTIFY_PHONE env var.
 NOTIFY_PHONE = os.environ.get("NOTIFY_PHONE", "+15555550100")
 
 
