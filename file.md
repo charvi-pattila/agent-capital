@@ -16,7 +16,7 @@ A full-stack "ultimate Claude bot manager" — one dashboard to run and manage m
 
 ## File Structure
 ```
-phone-to-claude/
+agent-capitol/
 ├── backend/
 │   ├── server.py          # Flask API (full rewrite)
 │   └── chat_runner.sh     # tmux session starter
@@ -85,12 +85,12 @@ phone-to-claude/
 ## How to Run
 ```bash
 # Terminal 1 — backend
-cd phone-to-claude
+cd agent-capitol
 source venv/bin/activate
 python backend/server.py
 
 # Terminal 2 — frontend
-cd phone-to-claude/frontend
+cd agent-capitol/frontend
 npm run dev
 ```
 Open: http://localhost:5173

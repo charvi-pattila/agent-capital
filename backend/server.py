@@ -1156,7 +1156,7 @@ def _council_loop(pid, path, diff_text, council, attempt):
 # user can correct any one of them mid-flight without touching the others. When
 # they're done the branches are merged back into the base branch together.
 
-SPLIT_ROOT = Path.home() / ".phone-to-claude-splits"
+SPLIT_ROOT = Path.home() / ".agent-capitol-splits"
 SPLIT_MAX_BRANCHES = 6
 SPLIT_DEFAULT_BRANCHES = 3
 SPLIT_CHECK_INTERVAL = 8    # seconds between agent-status sweeps

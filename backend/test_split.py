@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, "/Users/charvipattila/code/my-claude/phone-to-claude/backend")
+sys.path.insert(0, "/Users/charvipattila/code/my-claude/agent-capitol/backend")
 import server
 
 TMP = Path(tempfile.mkdtemp(prefix="splittest-"))
