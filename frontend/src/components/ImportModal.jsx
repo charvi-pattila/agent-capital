@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { ProjectMark } from "./Icon";
 import { api } from "../api";
 
 export default function ImportModal({ onClose, onImported }) {
@@ -49,7 +50,7 @@ export default function ImportModal({ onClose, onImported }) {
         {candidates === null ? (
           <div className="import-empty">Scanning folders...</div>
         ) : candidates.length === 0 ? (
-          <div className="import-empty">🎉 Every folder is already a project — nothing to import.</div>
+          <div className="import-empty">Every folder is already a project — nothing to import.</div>
         ) : (
           <div className="import-list">
             {candidates.map(c => (
@@ -59,7 +60,7 @@ export default function ImportModal({ onClose, onImported }) {
                   checked={!!selected[c.path]}
                   onChange={() => toggle(c.path)}
                 />
-                <span className="import-emoji" onClick={() => toggle(c.path)}>{c.emoji}</span>
+                <ProjectMark name={c.name || c.path} size={30} />
                 <div className="import-row-main">
                   <input
                     className="import-name"

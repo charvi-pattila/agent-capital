@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, streamRunning } from "../api";
+import Icon, { ProjectMark } from "../components/Icon";
 
 export default function Running() {
   const [sessions, setSessions] = useState([]);
@@ -28,17 +29,17 @@ export default function Running() {
 
       {blocked.length > 0 && (
         <div className="alert-section">
-          <div className="alert-header">⚠️ Needs Your Input</div>
+          <div className="alert-header"><Icon name="warning" size={16} /> Needs your input</div>
           {blocked.map(s => (
             <div key={s.id} className="session-card blocked" onClick={() => navigate(`/project/${s.id}`)}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ fontSize: 24 }}>{s.emoji}</span>
-                <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                <ProjectMark name={s.name} size={36} />
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 600 }}>{s.name}</div>
                   <div style={{ fontSize: 13, color: "var(--yellow)" }}>{s.blocked_reason || "Waiting for input"}</div>
                 </div>
               </div>
-              <button className="btn btn-primary btn-sm">Respond →</button>
+              <button className="btn btn-primary btn-sm">Respond <Icon name="chevron" size={14} /></button>
             </div>
           ))}
         </div>
@@ -46,20 +47,20 @@ export default function Running() {
 
       {running.length === 0 && blocked.length === 0 ? (
         <div style={{ textAlign: "center", paddingTop: 60, color: "var(--text2)" }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>😴</div>
+          <div className="empty-icon"><Icon name="moon" size={36} /></div>
           <div>No active sessions</div>
         </div>
       ) : (
         <div className="session-list">
           {running.map(s => (
             <div key={s.id} className="session-card" onClick={() => navigate(`/project/${s.id}`)}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
                 <div className="status-dot running" />
                 <span className="session-emoji-wrap">
-                  <span style={{ fontSize: 22 }}>{s.emoji}</span>
+                  <ProjectMark name={s.name} size={36} />
                   {s.unread > 0 && <span className="unread-badge">{s.unread > 9 ? "9+" : s.unread}</span>}
                 </span>
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 600 }}>{s.name}</div>
                   <div style={{ fontSize: 13, color: "var(--text2)" }}>
                     {s.unread > 0
@@ -68,7 +69,17 @@ export default function Running() {
                   </div>
                 </div>
               </div>
-              <span className="tag tag-running">running</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {s.context?.tokens != null && (
+                  <span
+                    className={"tag " + (s.context.bloated ? "tag-failed" : s.context.tokens >= s.context.threshold / 2 ? "tag-paused" : "tag-stopped")}
+                    title={`${s.context.tokens.toLocaleString()} tokens in context${s.context.hours != null ? ` · ${s.context.hours}h` : ""}`}
+                  >
+                    {s.context.trim_state ? "trimming…" : `${Math.round(s.context.tokens / 1000)}k ctx`}
+                  </span>
+                )}
+                <span className="tag tag-running">running</span>
+              </div>
             </div>
           ))}
         </div>

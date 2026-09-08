@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import Icon from "./Icon";
 import { api, streamSplit } from "../api";
 
 const STATE_LABEL = {
@@ -232,7 +233,7 @@ export default function SplitPanel({ projectId }) {
                   {busy === "cleanup" ? "Closing…" : "Close run"}
                 </button>
                 <button className="btn btn-primary btn-sm" onClick={() => doMerge(false)} disabled={busy === "merge" || state === "merging"}>
-                  {busy === "merge" || state === "merging" ? "Merging…" : "⤵ Merge all"}
+                  {busy === "merge" || state === "merging" ? "Merging…" : <><Icon name="merge" size={14} /> Merge all</>}
                 </button>
               </div>
             </div>
@@ -310,7 +311,7 @@ function PlanEditor({ draft, setDraft, onLaunch, onDiscard, busy }) {
               onChange={e => update(i, { name: e.target.value })}
               placeholder="branch name"
             />
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => remove(i)} title="Remove">✕</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => remove(i)} title="Remove"><Icon name="x" size={14} /></button>
           </div>
           <textarea
             className="memory-textarea"
@@ -330,7 +331,7 @@ function PlanEditor({ draft, setDraft, onLaunch, onDiscard, busy }) {
         <button className="btn btn-ghost btn-sm" onClick={add}>+ Add branch</button>
         <button className="btn btn-ghost btn-sm" onClick={onDiscard}>Start over</button>
         <button className="btn btn-primary btn-sm" onClick={onLaunch} disabled={chosen < 2 || busy}>
-          {busy ? "Launching…" : `▶ Launch ${chosen} agents`}
+          {busy ? "Launching…" : `Launch ${chosen} agents`}
         </button>
       </div>
       {chosen < 2 && <p className="form-hint">Keep at least 2 branches — fewer than that is just a normal chat message.</p>}

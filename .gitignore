@@ -11,3 +11,10 @@ data/
 .claude/settings.local.json
 
 .DS_Store
+
+# Service env (NOTIFY_PHONE, SSL_CERT/SSL_KEY, PORT...) — see README "Run as a background service"
+backend/.env
+
+# Desktop (Electron) build output
+desktop/node_modules/
+desktop/dist/

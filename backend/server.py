@@ -5,13 +5,14 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request, Response, send_file, session, redirect
@@ -21,8 +22,46 @@ from werkzeug.security import check_password_hash
 app = Flask(__name__)
 CORS(app)
 
-CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
-TMUX = "/opt/homebrew/bin/tmux"
+# ── Platform ─────────────────────────────────────────────────────────────────
+# The backend runs on macOS (the original home) or Linux — in practice Ubuntu
+# under WSL2 on a Windows box acting as an always-on server (docs/WINDOWS-SERVER.md).
+# Everything that only exists on a Mac (Terminal.app windows, notification
+# center, Bonjour names) is gated on IS_MACOS and silently skipped elsewhere.
+IS_MACOS = sys.platform == "darwin"
+
+
+def _detect_wsl():
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except OSError:
+        return False
+
+
+IS_WSL = (not IS_MACOS) and _detect_wsl()
+
+
+def _find_bin(env_var, name, *fallbacks):
+    """Locate an executable: explicit env override, then PATH, then known
+    install locations. Returns the last fallback (unexpanded) if nothing is
+    found so error messages name the path that was expected."""
+    override = os.environ.get(env_var)
+    if override:
+        return os.path.expanduser(override)
+    found = shutil.which(name)
+    if found:
+        return found
+    for candidate in fallbacks:
+        candidate = os.path.expanduser(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return os.path.expanduser(fallbacks[-1]) if fallbacks else name
+
+
+# CLAUDE_BIN / TMUX_BIN env vars override detection (TMUX itself is reserved:
+# tmux sets it inside every session). The native installer puts claude in
+# ~/.local/bin on both platforms; tmux is Homebrew on the Mac, apt on Ubuntu.
+CLAUDE_BIN = _find_bin("CLAUDE_BIN", "claude", "~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude")
+TMUX = _find_bin("TMUX_BIN", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux")
 DATA_DIR = Path(__file__).parent.parent / "data" / "projects"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -46,8 +85,6 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 PROJECTS_BASE_DIR = Path.home() / "code" / "my-claude"
 PROJECTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# iMessage/SMS target for limit-resume alerts (E.164). Set via NOTIFY_PHONE env var.
-NOTIFY_PHONE = os.environ.get("NOTIFY_PHONE", "+15555550100")
 
 
 def slugify(name):
@@ -225,9 +262,25 @@ def capture_pane(pid):
     return capture_session_pane(session_name(pid))
 
 
-def paste_into_session(session, message, delay=0.3):
-    """Type a message into a Claude Code tmux session and submit it. Used for the
-    project's own session and for each split agent's session alike.
+def cursor_position(session):
+    """Cursor cell (0-indexed, pane-relative) and visibility, so the terminal
+    mirror can draw a caret instead of just dumping static text — capture-pane
+    has no way to mark where the cursor actually is."""
+    r = subprocess.run(
+        [TMUX, "display-message", "-p", "-t", session, "-F", "#{cursor_x},#{cursor_y},#{cursor_flag}"],
+        capture_output=True, text=True
+    )
+    try:
+        x, y, flag = r.stdout.strip().split(",")
+        return {"x": int(x), "y": int(y), "visible": flag == "1"}
+    except (ValueError, AttributeError):
+        return None
+
+
+def paste_into_session(session, message, delay=0.3, submit=True):
+    """Type a message into a Claude Code tmux session and (by default) submit it.
+    Used for the project's own session and for each split agent's session alike,
+    and for injecting arbitrary pasted text into the terminal (submit=False).
 
     Two subtleties, both verified against a live tmux server:
     - Paste buffers are GLOBAL, not per-session ("set-buffer -t" targets a client,
@@ -238,12 +291,17 @@ def paste_into_session(session, message, delay=0.3):
     - "--" terminates the option list, so a message starting with "-" (a markdown
       bullet, a pasted diff's "--- a/file") isn't parsed as a flag. Without it
       set-buffer fails and paste-buffer silently re-sends the PREVIOUS message.
+
+    Uses tmux's bracketed-paste path (paste-buffer) rather than literal send-keys
+    so embedded newlines land as text in Claude Code's Ink input instead of each
+    one submitting early like a real Enter keypress would.
     """
     buf = f"p2c-{uuid.uuid4().hex[:8]}"
     subprocess.run([TMUX, "set-buffer", "-b", buf, "--", message])
     subprocess.run([TMUX, "paste-buffer", "-d", "-b", buf, "-t", session])
-    threading.Event().wait(delay)
-    subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+    if submit:
+        threading.Event().wait(delay)
+        subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
 
 
 # Claude Code's TUI is ready for input once it has painted its prompt box. The
@@ -296,6 +354,11 @@ def start_session(pid, project_path=None):
 
 
 def open_terminal_window(pid):
+    """Pop a native Terminal.app window attached to the session (macOS only).
+    On Linux the web mirror is the only UI; attach by hand with
+    `tmux attach -t <session>` if you are at the server's shell."""
+    if not IS_MACOS:
+        return
     session = session_name(pid)
     script = (
         'tell application "Terminal"\n'
@@ -313,6 +376,9 @@ def open_terminal_window(pid):
 def close_terminal_window(pid):
     marker = Path(f"/tmp/phone_terminal_{pid}")
     if not marker.exists():
+        return
+    if not IS_MACOS:
+        marker.unlink()
         return
     win_id = marker.read_text().strip()
     marker.unlink()
@@ -419,12 +485,20 @@ def clear_unread(pid):
 
 
 def notify_macos(title, message):
+    """Desktop notification. macOS: Notification Center via osascript. Linux:
+    there is usually no desktop (WSL server), so it goes to the log instead —
+    `journalctl -u agent-capitol` shows them — unless notify-send exists."""
     def esc(s):
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
     clean = " ".join((message or "").split())[:200]
-    script = f'display notification "{esc(clean)}" with title "{esc(title)}"'
-    subprocess.run(["osascript", "-e", script])
+    if IS_MACOS:
+        script = f'display notification "{esc(clean)}" with title "{esc(title)}"'
+        subprocess.run(["osascript", "-e", script])
+        return
+    print(f"[notify] {title}: {clean}", flush=True)
+    if shutil.which("notify-send") and os.environ.get("DISPLAY"):
+        subprocess.run(["notify-send", title, clean], capture_output=True)
 
 
 def wait_for_stable_reply(pid, message):
@@ -465,101 +539,257 @@ def send_to_session(pid, message, reply_id, project_name, notify=True):
     if meta:
         meta["last_activity"] = datetime.now().isoformat()
         save_meta(pid, meta)
+    return text
 
 
-# ── Usage-limit watchdog ──────────────────────────────────────────────────────
-# Two-stage: on Claude Code's "Approaching usage limit" warning (~95%), interrupt
-# the session and spend the remaining budget on a proper handoff summary. If the
-# hard "limit reached" lands anyway, snapshot the terminal instead (a limited
-# session can't answer prompts). Either way the session is kept alive and nudged
-# with "continue" only after the reset time, then the user gets a text.
+# ── Context-bloat monitor ─────────────────────────────────────────────────────
+# A long-running session accumulates tool output, dead ends and stale file
+# contents until Claude Code's own auto-compaction fires blind (nothing gets
+# saved first) or the model just gets slow and forgetful. This watches each
+# running session's live context size and, once it's bloated, has the agent
+# checkpoint what matters into project memory and then /compact with explicit
+# instructions about what to keep.
+#
+# Where the numbers come from: Claude Code writes every session's transcript to
+# ~/.claude/projects/<cwd with non-alphanumerics → "-">/<session-id>.jsonl, and
+# each assistant entry carries the API usage for that turn. input + cache
+# creation + cache read tokens is exactly the context that was sent on the
+# most recent turn — i.e. the live context size. Verified against a real
+# transcript on this Mac (2026-09-06).
+#
+# Replaced the usage-limit watchdog (2026-09-06): the upgraded plan doesn't hit
+# limits, and bloat, not quota, is what actually degrades long sessions.
 
-LIMIT_CHECK_INTERVAL = 20  # seconds
-LIMIT_RESUME_GRACE = 300   # ignore lingering limit text this long after a resume
+CONTEXT_CHECK_INTERVAL = 60  # seconds
+CONTEXT_TRIM_TOKENS = int(os.environ.get("CONTEXT_TRIM_TOKENS", "120000"))
+CONTEXT_MAX_HOURS = float(os.environ.get("CONTEXT_MAX_HOURS", "8"))
+CONTEXT_TRIM_COOLDOWN = 30 * 60  # seconds before the same session is trimmed again
+CONTEXT_COMPACT_TIMEOUT = 240    # seconds to wait for /compact to finish
 
-# Both require a concrete reset time nearby ("resets at 4pm", "resets Jul 17"),
-# so a session merely *talking about* limits doesn't trigger them.
-_RESET_NEARBY = (
-    r"resets?\b[^\n]{0,16}?"
-    r"(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm)\b|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2})"
+CONTEXT_CHECKPOINT_PROMPT = (
+    "This session's context has grown large, so it's about to be compacted. First write a "
+    "handoff checkpoint: what we've accomplished, what is in progress right now (which files "
+    "are being edited and why, decisions made and their reasons), what to do next, and any "
+    "gotchas discovered. Plain text, max 300 words. Future-you will work from this."
 )
-LIMIT_RE = re.compile(r"(?:limit reached|hit your [^\n]{0,40}limit)[\s\S]{0,200}?" + _RESET_NEARBY, re.I)
-APPROACHING_RE = re.compile(r"approaching[^\n]{0,40}limit[^\n]{0,80}?" + _RESET_NEARBY, re.I)
-
-RESET_AT_RE = re.compile(
-    r"resets?(?:\s+at)?\s+"
-    r"(?:(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(?P<day>\d{1,2})(?:\s+at)?[\s,]+)?"
-    r"(?P<h>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ap>am|pm)",
-    re.I,
+CONTEXT_COMPACT_INSTRUCTIONS = (
+    "Keep: the current task and its exact state, decisions and their reasons, files being "
+    "edited and what remains in each, next steps, and gotchas. Drop: exploration that led "
+    "nowhere, raw tool output, file contents already applied, and resolved questions."
 )
 
-MONTHS = {m: i + 1 for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+
+def transcript_dir(path):
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(Path(path).resolve()))
+    return Path.home() / ".claude" / "projects" / encoded
 
 
-def parse_reset_time(text, now=None):
-    """Best-effort parse of 'resets at 3pm' / 'resets Jul 17 at 10:30am'. None if absent."""
-    matches = list(RESET_AT_RE.finditer(text))
-    if not matches:
+def _first_timestamp(f):
+    try:
+        with open(f) as fh:
+            for line in fh:
+                try:
+                    ts = json.loads(line).get("timestamp")
+                except ValueError:
+                    continue
+                if ts:
+                    return ts
+    except OSError:
+        pass
+    return None
+
+
+def _parse_iso(ts):
+    """ISO string → aware UTC datetime (transcripts use a trailing Z; our own
+    fields are written with an explicit offset). None if unparseable."""
+    if not ts:
         return None
-    m = matches[-1]
-    now = now or datetime.now()
-    hour = int(m.group("h")) % 12 + (12 if m.group("ap").lower() == "pm" else 0)
-    minute = int(m.group("min") or 0)
-    if m.group("mon"):
-        t = now.replace(month=MONTHS[m.group("mon").lower()], day=int(m.group("day")),
-                        hour=hour, minute=minute, second=0, microsecond=0)
-        if t < now - timedelta(days=1):  # month rolled into next year
-            t = t.replace(year=t.year + 1)
-    else:
-        t = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if t <= now:
-            t += timedelta(days=1)
-    return t
+    try:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
-def _as_string(s):
-    """Escape a Python string into an AppleScript string expression."""
-    parts = s.replace("\\", "\\\\").replace('"', '\\"').split("\n")
-    return '"' + '" & return & "'.join(parts) + '"'
+def session_transcript(pid, path):
+    """The transcript belonging to this project's tmux session: the most
+    recently modified .jsonl for the cwd that started no earlier than the tmux
+    session did — the same directory can hold transcripts from the user's own
+    terminal sessions, and picking the newest blindly would read one of those."""
+    d = transcript_dir(path)
+    if not d.is_dir():
+        return None
+    r = subprocess.run([TMUX, "display-message", "-p", "-t", session_name(pid), "#{session_created}"],
+                       capture_output=True, text=True)
+    try:
+        created = datetime.fromtimestamp(int(r.stdout.strip()) - 60, tz=timezone.utc)
+    except ValueError:
+        created = None
+    candidates = []
+    for f in sorted(d.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)[:10]:
+        first = _parse_iso(_first_timestamp(f))
+        if created and first and first < created:
+            continue
+        candidates.append((f.stat().st_mtime, f, first))
+    if not candidates:
+        return None
+    _, f, first = max(candidates)
+    return f, first
 
 
-def send_text(body, to=None):
-    """Send an iMessage via Messages.app. Returns True if accepted for delivery."""
-    to = to or NOTIFY_PHONE
-    if not to:
+def _last_context_tokens(f):
+    """Context size on the most recent assistant turn, read from the tail of
+    the transcript (they grow to megabytes; the last turn is all we need)."""
+    try:
+        size = f.stat().st_size
+        with open(f, "rb") as fh:
+            fh.seek(max(0, size - 512 * 1024))
+            tail = fh.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"assistant"' not in line and "compact_boundary" not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        # A compaction (ours via /compact, or Claude Code's own auto-compact)
+        # logs {"type":"system","subtype":"compact_boundary","compactMetadata":
+        # {"preTokens":..,"postTokens":..}}. If that's the latest event, the
+        # post-compaction size is the truth — the assistant entry before it
+        # still carries the old, bloated count.
+        if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
+            post = (e.get("compactMetadata") or {}).get("postTokens")
+            if isinstance(post, int):
+                return post
+            continue
+        u = ((e.get("message") or {}).get("usage")) if e.get("type") == "assistant" else None
+        if u:
+            return (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                    + u.get("cache_read_input_tokens", 0))
+    return None
+
+
+_trim_state = {}  # pid -> "checkpoint" | "compacting" while a trim is in progress
+_trim_lock = threading.Lock()
+
+
+def context_status(pid, meta=None):
+    """What the UI shows and the monitor decides on: live token count, hours
+    since the session started (or since the last trim), and whether that
+    crosses the bloat line."""
+    meta = meta if meta is not None else (load_meta(pid) or {})
+    out = {"tokens": None, "hours": None, "bloated": False,
+           "threshold": CONTEXT_TRIM_TOKENS, "max_hours": CONTEXT_MAX_HOURS,
+           "last_trim": meta.get("context_trimmed_at"), "trims": meta.get("context_trims", 0),
+           "trim_state": _trim_state.get(pid)}
+    path = meta.get("path")
+    if not path or not session_running(pid):
+        return out
+    found = session_transcript(pid, path)
+    if not found:
+        return out
+    f, first = found
+    out["tokens"] = _last_context_tokens(f)
+    since = _parse_iso(meta.get("context_trimmed_at")) or first
+    if since:
+        out["hours"] = round((datetime.now(timezone.utc) - since).total_seconds() / 3600, 1)
+    out["bloated"] = _is_bloated(out["tokens"], out["hours"])
+    return out
+
+
+def _is_bloated(tokens, hours):
+    if not tokens:
         return False
-    script = (
-        'tell application "Messages"\n'
-        '\tset targetService to 1st account whose service type = iMessage\n'
-        f'\tset targetBuddy to participant "{to}" of targetService\n'
-        f'\tsend {_as_string(body[:600])} to targetBuddy\n'
-        "end tell"
-    )
-    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    if r.returncode != 0:
-        masked = to[:3] + "***" + to[-4:]
-        print(f"[limit-monitor] text to {masked} failed: {r.stderr.strip()}")
-    return r.returncode == 0
+    if tokens >= CONTEXT_TRIM_TOKENS:
+        return True
+    # Long-running *and* well on its way: don't let an all-day session coast
+    # toward the hard threshold and then compact mid-thought.
+    return hours is not None and hours >= CONTEXT_MAX_HOURS and tokens >= CONTEXT_TRIM_TOKENS // 2
 
 
-def capture_visible(pid):
-    """Visible pane only (no scrollback) — old limit messages scroll out of scope."""
-    r = subprocess.run(
-        [TMUX, "capture-pane", "-t", session_name(pid), "-p"],
-        capture_output=True, text=True
-    )
-    ansi = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi.sub('', r.stdout)
+def session_idle(pid):
+    """Prompt painted and nothing generating — safe to type into."""
+    pane = capture_pane(pid)
+    return bool(CLAUDE_READY_RE.search(pane)) and "esc to interrupt" not in pane
 
 
-def _save_terminal_tail(pid, reset_at):
-    tail = "\n".join(capture_pane(pid).splitlines()[-60:]).strip()
-    set_memory(pid, "last_session", (
-        f"(Auto-saved {datetime.now():%b %d %I:%M %p} — Claude usage limit; "
-        f"session paused, auto-resume at {reset_at:%b %d %I:%M %p}.)\n\n"
-        f"Terminal output just before the limit:\n```\n{tail}\n```"
-    ))
+def trim_context(pid, reason="auto"):
+    """Checkpoint, then compact. Serialised per project; returns True once the
+    compaction has visibly completed."""
+    with _trim_lock:
+        if pid in _trim_state:
+            return False
+        _trim_state[pid] = "checkpoint"
+    try:
+        meta = load_meta(pid) or {}
+        name = meta.get("name", pid)
+        if not session_running(pid):
+            return False
+        before = context_status(pid, meta).get("tokens")
+
+        # 1. Have the agent write down what matters while it still has the
+        #    full picture. Lands in the project's last_session memory, which is
+        #    injected on the next session start too.
+        saved = _save_session_summary(pid, notify=False, prompt=CONTEXT_CHECKPOINT_PROMPT)
+
+        # 2. Compact with instructions, and wait for the TUI to finish: the
+        #    footer keeps showing "esc to interrupt" / a "Compacting…" line
+        #    until the summary is in place.
+        _trim_state[pid] = "compacting"
+        session = session_name(pid)
+        paste_into_session(session, "/compact " + CONTEXT_COMPACT_INSTRUCTIONS)
+        threading.Event().wait(4)
+        deadline = datetime.now().timestamp() + CONTEXT_COMPACT_TIMEOUT
+        while datetime.now().timestamp() < deadline:
+            pane = capture_session_pane(session)
+            if "ompacting" not in pane and "esc to interrupt" not in pane and CLAUDE_READY_RE.search(pane):
+                break
+            threading.Event().wait(2)
+
+        meta = load_meta(pid) or {}
+        meta["context_trimmed_at"] = datetime.now(timezone.utc).isoformat()
+        meta["context_trims"] = meta.get("context_trims", 0) + 1
+        meta["context_last_trim"] = {"at": meta["context_trimmed_at"], "reason": reason,
+                                     "tokens_before": before, "checkpoint_saved": bool(saved)}
+        save_meta(pid, meta)
+        before_k = f"{before // 1000}k tokens" if before else "context"
+        notify_macos(name, f"🧹 Trimmed {before_k} — checkpoint saved to memory, context compacted")
+        print(f"[context-monitor] {name}: trimmed ({reason}), before={before}, checkpoint={bool(saved)}")
+        return True
+    finally:
+        with _trim_lock:
+            _trim_state.pop(pid, None)
+
+
+def _context_tick():
+    now = datetime.now(timezone.utc)
+    for p in all_projects():
+        pid = p["id"]
+        if not session_running(pid):
+            continue
+        meta = load_meta(pid) or {}
+        st = context_status(pid, meta)
+        if not st["bloated"]:
+            continue
+        last = _parse_iso(meta.get("context_trimmed_at"))
+        if last and (now - last).total_seconds() < CONTEXT_TRIM_COOLDOWN:
+            continue
+        # Never type into a session something else is driving right now.
+        if pid in _trim_state or pid in _review_inflight or not session_idle(pid):
+            continue
+        print(f"[context-monitor] {meta.get('name', pid)}: {st['tokens']} tokens, {st['hours']}h — trimming")
+        threading.Thread(target=trim_context, args=(pid, "auto"), daemon=True).start()
+
+
+def context_monitor():
+    while True:
+        threading.Event().wait(CONTEXT_CHECK_INTERVAL)
+        try:
+            _context_tick()
+        except Exception as e:
+            print(f"[context-monitor] error: {e}")
 
 
 def _save_session_summary(pid, notify=True, prompt=None):
@@ -585,117 +815,6 @@ def _save_session_summary(pid, notify=True, prompt=None):
         set_memory(pid, "last_session", text)
         return True
     return False
-
-
-def _handle_limit_hit(pid, meta, reset_at):
-    """Hard limit already hit — the session can't answer prompts, so snapshot
-    the terminal instead of asking for a summary. Nothing is typed into the
-    session until after the reset."""
-    name = meta.get("name", pid)
-    meta["limit_paused"] = True
-    meta["limit_resume_at"] = reset_at.isoformat()
-    save_meta(pid, meta)
-    _save_terminal_tail(pid, reset_at)
-    notify_macos(name, f"Usage limit hit — progress saved, auto-resuming at {reset_at:%-I:%M %p}")
-    print(f"[limit-monitor] {name}: limit hit, resume at {reset_at}")
-
-
-def _handle_limit_approaching(pid, meta, reset_at):
-    """~95% of the limit — interrupt the current task now and spend the last
-    bit of budget on a proper handoff summary while Claude can still answer."""
-    name = meta.get("name", pid)
-    meta["limit_paused"] = True
-    meta["limit_resume_at"] = reset_at.isoformat()
-    save_meta(pid, meta)
-
-    def _stop():
-        subprocess.run([TMUX, "send-keys", "-t", session_name(pid), "Escape"])
-        threading.Event().wait(1.5)
-        ok = _save_session_summary(pid, notify=False, prompt=(
-            "We're close to the usage limit, so we're pausing here. Stop what you're doing "
-            "and save a brief summary of what we accomplished and exactly where to pick up "
-            "next time. Plain text, max 200 words."))
-        if not ok:
-            _save_terminal_tail(pid, reset_at)
-        notify_macos(name, f"Approaching usage limit — paused early, auto-resuming at {reset_at:%-I:%M %p}")
-        print(f"[limit-monitor] {name}: approaching limit, paused early; resume at {reset_at}")
-
-    threading.Thread(target=_stop, daemon=True).start()
-
-
-def _resume_project(pid, meta):
-    name = meta.get("name", pid)
-    if session_running(pid):
-        # session survived — its full context is intact, just nudge it onward
-        session = session_name(pid)
-        msg = "The usage limit has reset. Continue where you left off."
-        subprocess.run([TMUX, "set-buffer", "-t", session, msg])
-        subprocess.run([TMUX, "paste-buffer", "-t", session])
-        threading.Event().wait(0.3)
-        subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
-    else:
-        if start_session(pid, meta.get("path")):
-            open_terminal_window(pid)
-        start_dev_server(pid, meta.get("path"), meta.get("server_cmd"))
-        threading.Event().wait(3)
-        context = build_context_prompt(pid)
-        prompt = (context + "\n\n" if context else "") + \
-            "We were interrupted by a usage limit. Continue where we left off."
-        _do_send_message(pid, prompt, notify=False)
-    notify_macos(name, "Usage limit reset — resuming work")
-
-
-def _limit_tick():
-    now = datetime.now()
-    resumed = []
-    for meta in all_projects():
-        pid = meta["id"]
-
-        if meta.get("limit_paused"):
-            try:
-                resume_at = datetime.fromisoformat(meta["limit_resume_at"])
-            except (KeyError, ValueError):
-                resume_at = now
-            if now >= resume_at:
-                _resume_project(pid, meta)
-                meta["limit_paused"] = False
-                meta["limit_resumed_at"] = now.isoformat()
-                save_meta(pid, meta)
-                resumed.append(meta.get("name", pid))
-            continue
-
-        if not session_running(pid):
-            continue
-        if meta.get("limit_resumed_at"):
-            try:
-                if (now - datetime.fromisoformat(meta["limit_resumed_at"])).total_seconds() < LIMIT_RESUME_GRACE:
-                    continue
-            except ValueError:
-                pass
-        pane = capture_visible(pid)
-        if not pane:
-            continue
-        if LIMIT_RE.search(pane):
-            reset_at = parse_reset_time(pane, now) or (now + timedelta(hours=5))
-            _handle_limit_hit(pid, meta, reset_at)
-        elif APPROACHING_RE.search(pane):
-            reset_at = parse_reset_time(pane, now) or (now + timedelta(hours=5))
-            _handle_limit_approaching(pid, meta, reset_at)
-
-    if resumed:
-        send_text(
-            f"Claude limit reset — resumed: {', '.join(resumed)}. "
-            "Picking up where we left off."
-        )
-
-
-def limit_monitor():
-    while True:
-        try:
-            _limit_tick()
-        except Exception as e:
-            print(f"[limit-monitor] error: {e}")
-        threading.Event().wait(LIMIT_CHECK_INTERVAL)
 
 
 # ── Blocked-session watchdog ─────────────────────────────────────────────────
@@ -814,6 +933,7 @@ def set_memory(pid, memory_type, content, component=None):
         p = base / MEMORY_FILES[memory_type]
     else:
         return False
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return True
 
@@ -850,6 +970,7 @@ def get_running_sessions():
             entry = {**p, "status": status or "running"}
             if blocked_reason:
                 entry["blocked_reason"] = blocked_reason
+            entry["context"] = context_status(p["id"], p)
             result.append(entry)
     return result
 
@@ -979,26 +1100,44 @@ def run_tests_for_project(pid):
     save_tests(pid, tests)
 
 
-# ── Council: 5 independent Claude testers auto-review every change ─────────────
-# After each chat turn, if the working tree changed, 5 one-shot `claude -p`
-# instances (independent of the interactive session, no shared context) each
-# read the diff, invent their own test cases, and vote APPROVE/REJECT. If it's
-# not unanimous, the rejection reasons are fed back into the live session to
-# fix, and the council re-runs on the new diff — up to COUNCIL_MAX_ATTEMPTS.
+# ── Review loop: one reviewer, the author decides when it's done ──────────────
+# After each chat turn, if the working tree changed, a single one-shot
+# `claude -p` reviewer (independent of the interactive session, no shared
+# context) reads the diff and either APPROVEs or reports concrete problems.
+# Problems go back into the live session, whose agent fixes what it agrees
+# with and then decides: "REVIEW: DONE" (it judges the change complete — the
+# loop ends) or "REVIEW: AGAIN" (re-review the new diff). The author's
+# decision is what terminates the loop; REVIEW_MAX_ROUNDS is only a backstop
+# so a stuck exchange can't cycle forever.
+#
+# This replaced a 5-tester unanimous-vote council (2026-09-05). With LLM
+# reviewers, five parallel opinions never converge — each one always finds
+# *something* — so it produced noise rather than signal, and the agent that
+# actually wrote the change had no say in when it was good enough.
 
-COUNCIL_TESTER_COUNT = 5
-COUNCIL_MAX_ATTEMPTS = 3
+REVIEW_MAX_ROUNDS = 3
+_review_inflight = set()
+_review_lock = threading.Lock()
+REVIEW_DECISION_RE = re.compile(r"REVIEW\s*[:\-]?\s*(DONE|AGAIN)\b", re.I)
 
-COUNCIL_TESTER_PROMPT = """You are an independent QA tester reviewing a code change just made to this project, as tester #{n} of {total} on a review council — all {total} must approve before the change ships. Don't assume the other testers cover anything; test thoroughly on your own, and don't edit any files.
+REVIEWER_PROMPT = """You are reviewing a code change just made to this project. Don't edit any files.
 
-Read the code and the diff below, understand what changed, then think of realistic edge cases and failure modes and actually verify them however you can (read the surrounding code paths, run the project's existing test/build/lint commands if any exist, trace through logic by hand). Be skeptical — your job is to find real problems, not rubber-stamp the change.
+Read the diff below and the surrounding code it touches. Look only for real defects: incorrect behavior, broken edge cases, regressions, security problems. If the project has a test/build/lint command, you may run it. Do NOT report style preferences, hypothetical refactors, missing tests, or anything you can't point to concretely. A sound change should get APPROVE, and approving is the expected outcome most of the time — don't invent findings to justify a review.
 
 Diff of what changed:
 ```
 {diff}
 ```
 
-Reply with your verdict as the FIRST line, exactly "APPROVE" or "REJECT", followed by a short explanation (2-5 sentences: what you tested and why)."""
+Reply with your verdict as the FIRST line, exactly "APPROVE" or "REJECT". If REJECT, follow with at most 3 findings, most severe first, one short paragraph each: what's wrong, where (file/function), and how you know."""
+
+FIX_PROMPT = """A reviewer looked at your last change and reported the findings below. Fix whatever is genuinely a problem. If a finding is wrong or not worth changing, say why instead of changing code — you have the final call.
+
+{findings}
+
+When you're finished, end your reply with exactly one of these lines:
+REVIEW: DONE  — the change is complete and needs no further review
+REVIEW: AGAIN — you changed enough that the reviewer should look once more"""
 
 
 def council_path(pid):
@@ -1045,8 +1184,11 @@ def _compute_diff_signature(path):
     return full, signature
 
 
-def _run_council_tester(path, diff_text, n):
-    prompt = COUNCIL_TESTER_PROMPT.format(n=n, total=COUNCIL_TESTER_COUNT, diff=diff_text[:12000])
+def _run_reviewer(path, diff_text):
+    """One independent `claude -p` pass over the diff. Returned in the same
+    shape the old per-tester records used (name/verdict/reason) so existing
+    council.json history and the Council tab keep rendering."""
+    prompt = REVIEWER_PROMPT.format(diff=diff_text[:12000])
     try:
         result = subprocess.run(
             [CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
@@ -1054,18 +1196,18 @@ def _run_council_tester(path, diff_text, n):
         )
         out = result.stdout.strip()
     except Exception as e:
-        return {"name": f"Tester {n}", "verdict": "ERROR", "reason": str(e)}
+        return {"name": "Reviewer", "verdict": "ERROR", "reason": str(e)}
     lines = out.splitlines()
     first = lines[0].strip().upper() if lines else ""
     verdict = "APPROVE" if first.startswith("APPROVE") else "REJECT"
     reason = "\n".join(lines[1:]).strip() or out
-    return {"name": f"Tester {n}", "verdict": verdict, "reason": reason[:2000]}
+    return {"name": "Reviewer", "verdict": verdict, "reason": reason[:4000]}
 
 
 def run_council(pid):
     """Entry point called after a chat turn completes. No-ops unless the
     project is a git repo with a real, not-yet-reviewed change, and skips if
-    a council run is already in flight for this project."""
+    a review is already in flight for this project."""
     meta = load_meta(pid)
     if not meta:
         return
@@ -1073,19 +1215,42 @@ def run_council(pid):
     if not path or not os.path.isdir(path) or not is_git_repo(path):
         return
 
-    council = load_council(pid)
-    if council.get("state") in ("running_council", "fixing"):
-        return
+    # In-flight tracking lives in memory, not in council.json: the file's
+    # "running_council"/"fixing" state survives a server restart mid-run, and
+    # trusting it left projects stuck in "reviewing…" forever with every later
+    # review silently skipped (seen on a real project, stale since 2026-07-31).
+    with _review_lock:
+        if pid in _review_inflight:
+            return
+        _review_inflight.add(pid)
+    try:
+        council = load_council(pid)
+        for run in council.get("runs", []):
+            if not run.get("finished"):
+                run["finished"] = datetime.now().isoformat()
+                run["aborted"] = True  # orphaned by a restart; shown as "interrupted"
 
-    diff_text, signature = _compute_diff_signature(path)
-    if not diff_text.strip() or signature == council.get("last_signature"):
-        return
+        diff_text, signature = _compute_diff_signature(path)
+        if not diff_text.strip() or signature == council.get("last_signature"):
+            if council.get("state") in ("running_council", "fixing"):
+                council["state"] = "idle"
+                save_council(pid, council)
+            return
 
-    council["last_signature"] = signature
-    _council_loop(pid, path, diff_text, council, attempt=1)
+        council["last_signature"] = signature
+        _review_loop(pid, path, diff_text, council, attempt=1)
+    finally:
+        with _review_lock:
+            _review_inflight.discard(pid)
 
 
-def _council_loop(pid, path, diff_text, council, attempt):
+def _finish(pid, council, state, name, message):
+    council["state"] = state
+    save_council(pid, council)
+    notify_macos(name, message)
+
+
+def _review_loop(pid, path, diff_text, council, attempt):
     name = (load_meta(pid) or {}).get("name", pid)
     run = {
         "id": uuid.uuid4().hex[:8],
@@ -1095,56 +1260,59 @@ def _council_loop(pid, path, diff_text, council, attempt):
         "diff_preview": diff_text[:4000],
         "testers": [],
         "approved": None,
+        "author": None,  # {"decision": "DONE"|"AGAIN"|"NONE", "reply": str} once the author has answered
     }
     council["state"] = "running_council"
     council.setdefault("runs", []).append(run)
     save_council(pid, council)
 
-    with ThreadPoolExecutor(max_workers=COUNCIL_TESTER_COUNT) as ex:
-        futures = [ex.submit(_run_council_tester, path, diff_text, n) for n in range(1, COUNCIL_TESTER_COUNT + 1)]
-        testers = [f.result() for f in futures]
-
-    run["testers"] = testers
-    run["approved"] = all(t["verdict"] == "APPROVE" for t in testers)
+    reviewer = _run_reviewer(path, diff_text)
+    run["testers"] = [reviewer]
+    run["approved"] = reviewer["verdict"] == "APPROVE"
     run["finished"] = datetime.now().isoformat()
-    n_reject = sum(1 for t in testers if t["verdict"] != "APPROVE")
 
-    if run["approved"] or attempt >= COUNCIL_MAX_ATTEMPTS or not session_running(pid):
-        council["state"] = "approved" if run["approved"] else "gave_up"
-        save_council(pid, council)
-        if run["approved"]:
-            notify_macos(name, "✅ Council approved the latest change (5/5)")
-        else:
-            notify_macos(name, f"⚠️ Council: {n_reject}/5 testers found issues after {attempt} attempt(s) — see Council tab")
+    if run["approved"]:
+        _finish(pid, council, "approved", name, "✅ Reviewer approved the latest change")
+        return
+    if reviewer["verdict"] == "ERROR" or not session_running(pid):
+        _finish(pid, council, "gave_up", name, "⚠️ Review couldn't complete — see Council tab")
         return
 
-    # Not unanimous and attempts remain: hand the rejection reasons back to the
-    # live session to fix, then re-run the council against the new diff.
+    # Hand the findings to the author. It fixes what it agrees with and then
+    # decides whether the loop continues.
     council["state"] = "fixing"
     save_council(pid, council)
 
-    feedback = "\n\n".join(
-        f"Tester {i + 1}: {t['reason']}" for i, t in enumerate(testers) if t["verdict"] != "APPROVE"
-    )
-    fix_prompt = (
-        f"The council of independent testers reviewed your last change and {n_reject}/5 found problems. "
-        f"Please fix the issues below, then let me know when you're done.\n\n{feedback}"
-    )
-
+    fix_prompt = FIX_PROMPT.format(findings=reviewer["reason"])
     msgs = load_messages(pid)
     next_id = (max(m["id"] for m in msgs) + 1) if msgs else 1
     reply_id = next_id + 1
-    append_message(pid, {"id": next_id, "role": "user", "text": "[Council feedback]\n" + fix_prompt, "status": "done", "timestamp": datetime.now().isoformat()})
-    append_message(pid, {"id": reply_id, "role": "assistant", "text": "Addressing council feedback...", "status": "thinking", "timestamp": datetime.now().isoformat()})
-    send_to_session(pid, fix_prompt, reply_id, name, notify=False)
+    append_message(pid, {"id": next_id, "role": "user", "text": "[Review feedback]\n" + fix_prompt, "status": "done", "timestamp": datetime.now().isoformat()})
+    append_message(pid, {"id": reply_id, "role": "assistant", "text": "Addressing review feedback...", "status": "thinking", "timestamp": datetime.now().isoformat()})
+    reply = send_to_session(pid, fix_prompt, reply_id, name, notify=False) or ""
 
-    new_diff, new_sig = _compute_diff_signature(path)
-    council["last_signature"] = new_sig
-    if not new_diff.strip():
-        council["state"] = "gave_up"
-        save_council(pid, council)
+    m = REVIEW_DECISION_RE.search(reply)
+    decision = m.group(1).upper() if m else "NONE"
+    run["author"] = {"decision": decision, "reply": reply[-2000:]}
+
+    # Whatever the author did counts as reviewed: record the new tree state so
+    # the next chat turn doesn't re-review the fix itself.
+    new_diff, council["last_signature"] = _compute_diff_signature(path)
+
+    if decision != "AGAIN":
+        # DONE, or no explicit decision at all — either way the author didn't
+        # ask for another pass, and defaulting to "stop" is what keeps this
+        # loop finite when the reply is malformed.
+        suffix = "" if decision == "DONE" else " (no explicit decision in its reply)"
+        _finish(pid, council, "done", name, f"✔ Author addressed the review and closed it{suffix}")
         return
-    _council_loop(pid, path, new_diff, council, attempt + 1)
+    if attempt >= REVIEW_MAX_ROUNDS:
+        _finish(pid, council, "gave_up", name, f"⚠️ Review still open after {attempt} rounds — see Council tab")
+        return
+    if not new_diff.strip():
+        _finish(pid, council, "done", name, "✔ Review closed — nothing left to re-review")
+        return
+    _review_loop(pid, path, new_diff, council, attempt + 1)
 
 
 # ── Split runs (parallel mini-agents, one git worktree each) ─────────────────
@@ -1740,7 +1908,7 @@ def kill_split_sessions(pid):
 # Close All already asks every live session for a handoff summary before killing
 # it. That's the raw material for a day's report: gather each project touched
 # today (the ones just closed, plus any paused earlier or auto-paused by the
-# limit watchdog), render it to a PDF via the Chrome that's already used for
+# context monitor), render it to a PDF via the Chrome that's already used for
 # screenshot tests, and email it as an attachment.
 
 REPORTS_DIR = DATA_DIR.parent / "reports"
@@ -1780,7 +1948,7 @@ def collect_day_activity(pid, today=None):
 
     Activity is judged from recorded timestamps only — meta's `last_activity` and
     the message log — never from file mtimes. Every path that writes a session
-    summary (Close All, the limit watchdog) goes through send_to_session, which
+    summary (Close All, the context-bloat monitor) goes through send_to_session, which
     stamps last_activity, so mtime adds nothing but false positives: restoring a
     backup or touching a file would otherwise resurrect a project into the
     report. Close All additionally passes the sessions it just closed explicitly."""
@@ -1816,7 +1984,6 @@ def collect_day_activity(pid, today=None):
         "messages": len(today_msgs),
         "first": times[0] if times else None,
         "last": times[-1] if times else None,
-        "limit_paused": bool(meta.get("limit_paused")),
         "council": {
             "runs": len(council_runs),
             "approved": sum(1 for r in council_runs if r.get("approved")),
@@ -1847,8 +2014,6 @@ def build_report_html(projects, day=None):
             meta_bits.append(f"{_fmt_time(p['first'])} – {_fmt_time(p['last'])}")
         if p["messages"]:
             meta_bits.append(f"{p['messages']} message{'s' if p['messages'] != 1 else ''}")
-        if p["limit_paused"]:
-            meta_bits.append("paused for usage limit")
 
         extras = ""
         if p["council"]:
@@ -1975,7 +2140,7 @@ def build_and_send_daily_report(extra_pids=None):
                 "id": meta["id"], "name": meta.get("name", meta["id"]),
                 "emoji": meta.get("emoji", "📁"), "description": meta.get("description", ""),
                 "summary": "", "errors": "", "messages": 0, "first": None, "last": None,
-                "limit_paused": False, "council": None, "splits": [],
+                "council": None, "splits": [],
             }}
         if entry:
             projects.append(entry)
@@ -2064,7 +2229,26 @@ def get_project(pid):
         return jsonify({"error": "Not found"}), 404
     meta["status"] = "running" if session_running(pid) else "stopped"
     meta["server_running"] = dev_server_running(pid)
+    meta["context"] = context_status(pid, meta)
     return jsonify(meta)
+
+
+@app.route("/api/projects/<pid>/context")
+def get_context(pid):
+    return jsonify(context_status(pid))
+
+
+@app.route("/api/projects/<pid>/context/trim", methods=["POST"])
+def trim_context_now(pid):
+    """Manual trim from the UI: same checkpoint-then-compact as the monitor."""
+    if not session_running(pid):
+        return jsonify({"started": False, "error": "Session not running"}), 400
+    if pid in _trim_state:
+        return jsonify({"started": False, "error": "Already trimming"}), 409
+    if not session_idle(pid):
+        return jsonify({"started": False, "error": "Claude is busy — wait for it to finish"}), 409
+    threading.Thread(target=trim_context, args=(pid, "manual"), daemon=True).start()
+    return jsonify({"started": True})
 
 
 @app.route("/api/projects/<pid>", methods=["PUT"])
@@ -2659,7 +2843,7 @@ def send_keys(pid):
     if not session_running(pid):
         return jsonify({"ok": False}), 400
     data = request.get_json() or {}
-    allowed = {"Up", "Down", "Left", "Right", "Enter", "Tab", "Escape", "Space"}
+    allowed = {"Up", "Down", "Left", "Right", "Enter", "Tab", "BTab", "Escape", "Space", "BSpace"}
     keys = [k for k in data.get("keys", []) if k in allowed][:30]
     if not keys:
         return jsonify({"ok": False, "error": "no valid keys"}), 400
@@ -2668,6 +2852,31 @@ def send_keys(pid):
         if i > 0:
             threading.Event().wait(0.06)
         subprocess.run([TMUX, "send-keys", "-t", session, key])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/projects/<pid>/type", methods=["POST"])
+def type_text(pid):
+    """Forward literal text into the session as it's typed — the raw-terminal
+    counterpart to send-keys, used for printable characters and for pastes
+    instead of a compose-then-submit box, so the terminal mirror echoes
+    keystrokes the same way a real terminal (or `ssh` session) would.
+
+    A single character goes straight through send-keys -l (fast, no buffer
+    setup — matters for per-keystroke latency while typing live). Anything
+    longer (a paste, possibly multi-line) goes through paste_into_session's
+    bracketed-paste path with submit=False so embedded newlines land as text
+    instead of each one acting like an early Enter."""
+    if not session_running(pid):
+        return jsonify({"ok": False}), 400
+    text = (request.get_json() or {}).get("text", "")
+    if not text:
+        return jsonify({"ok": False, "error": "no text"}), 400
+    session = session_name(pid)
+    if len(text) == 1 and text != "\n":
+        subprocess.run([TMUX, "send-keys", "-t", session, "-l", "--", text])
+    else:
+        paste_into_session(session, text, submit=False)
     return jsonify({"ok": True})
 
 
@@ -2682,12 +2891,20 @@ def terminal_stream(pid):
                     current = capture_pane(pid)
                     if current != prev:
                         prev = current
-                        yield f"data: {json.dumps({'content': current})}\n\n"
+                        payload = {"content": current}
+                        cursor = cursor_position(session_name(pid))
+                        if cursor:
+                            payload["cursor"] = cursor
+                        yield f"data: {json.dumps(payload)}\n\n"
                 else:
                     yield f"data: {json.dumps({'content': '', 'offline': True})}\n\n"
             except Exception:
                 pass
-            threading.Event().wait(0.3)
+            # Fast poll (was 0.3s) — this interval directly caps how quickly a
+            # typed keystroke reflects back in the terminal mirror; at 0.3s,
+            # live typing felt laggy even though the keystroke itself landed
+            # in tmux almost immediately.
+            threading.Event().wait(0.05)
 
     return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -2895,6 +3112,69 @@ def require_login():
 FRONTEND_DIST = (Path(__file__).parent.parent / "frontend" / "dist").resolve()
 
 
+def _run_quiet(cmd, timeout=3):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _tailscale_url():
+    """https://<machine>.<tailnet>.ts.net if this machine is on a tailnet and
+    the CLI is reachable. Under WSL the Windows tailscale.exe is used (WSL runs
+    Windows executables directly), since Tailscale is installed on the Windows
+    side there, and its `tailscale serve` is what fronts this backend."""
+    candidates = [
+        shutil.which("tailscale"),
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/mnt/c/Program Files/Tailscale/tailscale.exe",
+    ]
+    for bin_ in candidates:
+        if not bin_ or not os.path.isfile(bin_):
+            continue
+        out = _run_quiet([bin_, "status", "--json"], timeout=5)
+        if not out:
+            continue
+        try:
+            dns_name = (json.loads(out).get("Self") or {}).get("DNSName") or ""
+        except ValueError:
+            continue
+        dns_name = dns_name.rstrip(".")
+        if dns_name:
+            return f"https://{dns_name}"
+    return ""
+
+
+@app.route("/api/hostname")
+def hostname_info():
+    """Addresses for the 'Install as an app' card in the About tab.
+
+    public_url   — the one to bookmark from anywhere: PUBLIC_URL from the
+                   environment (backend/.env) if set, else the Tailscale
+                   MagicDNS https URL if this machine is on a tailnet.
+    local_hostname — the LAN name with port. On a Mac that's the .local
+                   (Bonjour) name, which survives DHCP renumbering. On Linux it
+                   is the plain hostname (Bonjour needs avahi, which WSL lacks),
+                   so it's only useful with a public_url in front of it.
+    lan_ip       — hint only; goes stale."""
+    port = int(os.environ.get("PORT", "8888"))
+    if IS_MACOS:
+        name = _run_quiet(["scutil", "--get", "LocalHostName"]) or socket.gethostname().split(".")[0]
+        local_hostname = f"{name}.local"
+        lan_ip = _run_quiet(["ipconfig", "getifaddr", "en0"]) or None
+    else:
+        local_hostname = socket.gethostname().split(".")[0]
+        lan_ip = (_run_quiet(["hostname", "-I"]).split() or [None])[0]
+    public_url = (os.environ.get("PUBLIC_URL") or "").strip().rstrip("/") or _tailscale_url() or None
+    return jsonify({
+        "public_url": public_url,
+        "local_hostname": local_hostname,
+        "port": port,
+        "lan_ip": lan_ip,
+        "platform": "macos" if IS_MACOS else ("wsl" if IS_WSL else "linux"),
+    })
+
+
 @app.route("/")
 @app.route("/<path:path>")
 def serve_frontend(path=""):
@@ -2940,8 +3220,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     atexit.register(_shutdown_once)
-    threading.Thread(target=limit_monitor, daemon=True).start()
+    threading.Thread(target=context_monitor, daemon=True).start()
     threading.Thread(target=blocked_monitor, daemon=True).start()
     threading.Thread(target=split_monitor, daemon=True).start()
-    print("Claude Manager backend running on http://0.0.0.0:8888")
-    app.run(host="0.0.0.0", port=8888, debug=False, threaded=True)
+    _host = os.environ.get("HOST", "0.0.0.0")
+    _port = int(os.environ.get("PORT", "8888"))
+    _cert, _key = os.environ.get("SSL_CERT"), os.environ.get("SSL_KEY")
+    _ssl = (_cert, _key) if _cert and _key and os.path.isfile(_cert) and os.path.isfile(_key) else None
+    print(f"Claude Manager backend running on {'https' if _ssl else 'http'}://{_host}:{_port}", flush=True)
+    app.run(host=_host, port=_port, debug=False, threaded=True, ssl_context=_ssl)

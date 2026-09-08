@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the Agent Capitol launchd LaunchAgent.
+  Do not install this file directly: run scripts/install-service.sh, which
+  replaces the __PLACEHOLDER__ values with absolute paths, merges backend/.env
+  into EnvironmentVariables, and writes the result to
+  ~/Library/LaunchAgents/com.agent-capitol.server.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__SERVER__</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <!-- Start at login and restart whenever the process exits, for any reason. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Minimum seconds between restarts (avoids a tight crash loop). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/server.err.log</string>
+
+    <!--
+      launchd does not source your shell profile, so PATH must be explicit:
+      ~/.local/bin (claude CLI), /opt/homebrew/bin (tmux), plus system dirs.
+      The install script appends PORT/HOST/SSL_*/CONTEXT_* etc. from
+      backend/.env (and the installer's port flag) here.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

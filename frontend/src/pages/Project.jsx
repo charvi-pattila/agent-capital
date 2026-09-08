@@ -8,8 +8,18 @@ import PreviewPanel from "../components/PreviewPanel";
 import AboutPanel from "../components/AboutPanel";
 import CouncilPanel from "../components/CouncilPanel";
 import SplitPanel from "../components/SplitPanel";
+import ContextGauge from "../components/ContextGauge";
+import Icon, { ProjectMark } from "../components/Icon";
 
-const TABS = ["Chat", "Split", "Memory", "Testing", "Preview", "Council", "About"];
+const TABS = [
+  { key: "Chat", icon: "terminal" },
+  { key: "Split", icon: "split" },
+  { key: "Memory", icon: "brain" },
+  { key: "Testing", icon: "flask" },
+  { key: "Preview", icon: "eye" },
+  { key: "Council", icon: "scale" },
+  { key: "About", icon: "info" },
+];
 
 export default function Project() {
   const { id } = useParams();
@@ -37,41 +47,40 @@ export default function Project() {
 
   return (
     <div className="project-view">
+      {/* On the phone this collapses to: back · status dot · name · gauge · Start/Pause
+          (the subtitle, mark and status tag hide via CSS). */}
       <div className="project-header">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => navigate("/")}>← Back</button>
-          <span style={{ fontSize: 28 }}>{project.emoji}</span>
-          <div>
+        <div className="project-header-main" style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <button className="btn btn-ghost btn-sm btn-icon" onClick={() => navigate("/")} title="Back to projects" aria-label="Back">
+            <Icon name="back" size={18} />
+          </button>
+          <ProjectMark name={project.name} size={40} />
+          <span className={`status-dot ${status}`} />
+          <div style={{ minWidth: 0 }}>
             <div className="page-title">{project.name}</div>
             <div className="page-subtitle">{project.description || "No description"}</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          {status === "running" && <ContextGauge projectId={id} initial={project.context} />}
           <span className={`tag tag-${status}`}>{status}</span>
           {status !== "running" ? (
-            <button className="btn btn-primary btn-sm" onClick={handleStart}>▶ Start</button>
+            <button className="btn btn-primary btn-sm" onClick={handleStart}><Icon name="play" size={14} /> Start</button>
           ) : (
-            <button className="btn btn-ghost btn-sm" onClick={handlePause}>⏸ Pause</button>
+            <button className="btn btn-ghost btn-sm" onClick={handlePause}><Icon name="pause" size={14} /> Pause</button>
           )}
         </div>
       </div>
 
-      {project.limit_paused && (
-        <div className="limit-banner">
-          ⏳ Paused for Claude usage limit — progress saved. Auto-resuming at{" "}
-          <b>{new Date(project.limit_resume_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</b>
-          {" "}(you'll get a text).
-        </div>
-      )}
-
       <div className="project-tabs">
         {TABS.map(t => (
           <button
-            key={t}
-            className={"tab-btn" + (tab === t ? " active" : "")}
-            onClick={() => setTab(t)}
+            key={t.key}
+            className={"tab-btn" + (tab === t.key ? " active" : "")}
+            onClick={() => setTab(t.key)}
           >
-            {t}
+            <Icon name={t.icon} size={15} />
+            {t.key}
           </button>
         ))}
       </div>

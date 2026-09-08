@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
+import Icon from "./Icon";
 
 const MEMORY_TYPES = [
-  { key: "last_session", label: "Last Session", icon: "📝", desc: "What happened last time, where we left off" },
-  { key: "errors", label: "Errors & Fixes", icon: "🐛", desc: "Problems encountered and how they were solved" },
-  { key: "skills", label: "Skills", icon: "⚡", desc: "Reusable patterns and learned techniques" },
+  { key: "last_session", label: "Last Session", icon: "note", desc: "What happened last time, where we left off" },
+  { key: "errors", label: "Errors & Fixes", icon: "bug", desc: "Problems encountered and how they were solved" },
+  { key: "skills", label: "Skills", icon: "spark", desc: "Reusable patterns and learned techniques" },
 ];
 
 export default function MemoryPanel({ projectId }) {
@@ -56,7 +57,7 @@ export default function MemoryPanel({ projectId }) {
     return (
       <div className="memory-editor">
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>← Back</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}><Icon name="back" size={14} /> Back</button>
           <span style={{ fontWeight: 600 }}>{label}</span>
         </div>
         <textarea
@@ -83,7 +84,7 @@ export default function MemoryPanel({ projectId }) {
         </div>
         <div className="memory-item" onClick={() => startEdit("global", globalMemory)}>
           <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-            <span style={{ fontSize: 20 }}>🌐</span>
+            <Icon name="globe" size={20} style={{ color: "var(--accent2)" }} />
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, marginBottom: 2 }}>Shared Notes</div>
               <div style={{ fontSize: 13, color: "var(--text2)" }}>Injected into every project's context, not just this one</div>
@@ -92,7 +93,7 @@ export default function MemoryPanel({ projectId }) {
               )}
             </div>
           </div>
-          <button className="btn btn-ghost btn-sm">Edit →</button>
+          <button className="btn btn-ghost btn-sm">Edit <Icon name="chevron" size={14} /></button>
         </div>
       </div>
 
@@ -101,7 +102,7 @@ export default function MemoryPanel({ projectId }) {
         {MEMORY_TYPES.map(t => (
           <div key={t.key} className="memory-item" onClick={() => startEdit(t.key, memory[t.key])}>
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 20 }}>{t.icon}</span>
+              <Icon name={t.icon} size={20} style={{ color: "var(--accent2)" }} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, marginBottom: 2 }}>{t.label}</div>
                 <div style={{ fontSize: 13, color: "var(--text2)" }}>{t.desc}</div>
@@ -110,7 +111,7 @@ export default function MemoryPanel({ projectId }) {
                 )}
               </div>
             </div>
-            <button className="btn btn-ghost btn-sm">Edit →</button>
+            <button className="btn btn-ghost btn-sm">Edit <Icon name="chevron" size={14} /></button>
           </div>
         ))}
       </div>
@@ -120,7 +121,7 @@ export default function MemoryPanel({ projectId }) {
         {components.map(c => (
           <div key={c.name} className="memory-item" onClick={() => startEdit(`comp:${c.name}`, c.content)}>
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 20 }}>🧩</span>
+              <Icon name="split" size={20} style={{ color: "var(--accent2)" }} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, marginBottom: 2 }}>{c.name}</div>
                 {c.content && (
@@ -128,7 +129,7 @@ export default function MemoryPanel({ projectId }) {
                 )}
               </div>
             </div>
-            <button className="btn btn-ghost btn-sm">Edit →</button>
+            <button className="btn btn-ghost btn-sm">Edit <Icon name="chevron" size={14} /></button>
           </div>
         ))}
         <div className="add-component">

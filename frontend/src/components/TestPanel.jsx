@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
+import Icon from "./Icon";
 
 export default function TestPanel({ projectId }) {
   const [tests, setTests] = useState([]);
@@ -25,7 +26,10 @@ export default function TestPanel({ projectId }) {
     load();
   };
 
-  const statusIcon = (s) => ({ passing: "✅", failing: "❌", running: "⏳", pending: "⏸", baseline_saved: "📸" }[s] || "⏸");
+  const statusIcon = (s) => {
+    const spec = { passing: ["check", "var(--green)"], failing: ["x", "var(--red)"], running: ["clock", "var(--yellow)"], pending: ["pause", "var(--text3)"], baseline_saved: ["camera", "var(--accent2)"] }[s] || ["pause", "var(--text3)"];
+    return <Icon name={spec[0]} size={16} style={{ color: spec[1], verticalAlign: "-3px" }} />;
+  };
 
   const acceptBaseline = async (testId) => {
     await api.acceptTestBaseline(projectId, testId);
@@ -39,7 +43,7 @@ export default function TestPanel({ projectId }) {
         <div style={{ display: "flex", gap: 10 }}>
           <button className="btn btn-ghost btn-sm" onClick={() => setShowForm(true)}>+ Add Test</button>
           <button className="btn btn-primary btn-sm" onClick={runTests} disabled={running || tests.length === 0}>
-            {running ? "Running..." : "▶ Run All"}
+            {running ? "Running..." : <><Icon name="play" size={14} /> Run all</>}
           </button>
         </div>
       </div>
@@ -81,7 +85,7 @@ export default function TestPanel({ projectId }) {
 
       {tests.length === 0 ? (
         <div style={{ textAlign: "center", paddingTop: 40, color: "var(--text2)" }}>
-          <div style={{ fontSize: 32, marginBottom: 8 }}>🧪</div>
+          <div className="empty-icon"><Icon name="flask" size={32} /></div>
           <div>No tests yet. Add a test to get started.</div>
         </div>
       ) : (

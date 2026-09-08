@@ -1,0 +1,38 @@
+# Template for the Agent Capitol systemd unit (Linux / Ubuntu under WSL2).
+# Do not install this file directly: run scripts/install-service-linux.sh,
+# which fills in the placeholder values and writes the result to
+# /etc/systemd/system/agent-capitol.service.
+[Unit]
+Description=Agent Capitol backend (Flask on port __PORT__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__PYTHON__ __SERVER__
+# Restart whenever it exits, for any reason; wait 5s so a crash can't tight-loop.
+Restart=always
+RestartSec=5
+# Only the Python process gets SIGTERM. The tmux server (and the Claude sessions
+# in it) are left alone, so a backend crash + auto-restart re-finds live sessions
+# instead of killing them. A deliberate stop still closes them: server.py's own
+# SIGTERM handler runs the same save-then-kill path as the Close All button, which
+# can take up to ~2 minutes when several sessions need summaries written.
+KillMode=process
+TimeoutStopSec=180
+# systemd does not source the user's shell profile, so PATH must be explicit:
+# ~/.local/bin (claude CLI) plus system dirs (tmux, git, node).
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=__HOME__
+Environment=LANG=en_US.UTF-8
+Environment=PYTHONUNBUFFERED=1
+# Optional KEY=VALUE file: PORT, HOST, PUBLIC_URL, SSL_CERT/SSL_KEY, CONTEXT_* ...
+EnvironmentFile=-__ENV_FILE__
+# Logs: journalctl -u agent-capitol -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

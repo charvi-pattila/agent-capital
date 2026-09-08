@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import Icon, { ProjectMark } from "./Icon";
 import { api } from "../api";
 
 // phase: "confirm" → "closing" → "done" | "error" | "none-running"
@@ -75,7 +76,7 @@ export default function CloseAllModal({ onClose }) {
             </div>
             <ul className="close-modal-list">
               {targets.map(p => (
-                <li key={p.id}><span className="close-item-emoji">{p.emoji}</span> {p.name}</li>
+                <li key={p.id}><ProjectMark name={p.name} size={22} /> {p.name}</li>
               ))}
             </ul>
             <div className="modal-actions">
@@ -89,7 +90,7 @@ export default function CloseAllModal({ onClose }) {
 
         {(phase === "closing" || phase === "done") && (
           <>
-            <h2>{phase === "done" ? "All sessions closed ✓" : "Saving & closing sessions..."}</h2>
+            <h2>{phase === "done" ? "All sessions closed" : "Saving & closing sessions..."}</h2>
             <div className="progress-track">
               <div className={"progress-fill" + (phase === "done" ? " done" : "")} style={{ width: `${pct}%` }} />
             </div>
@@ -103,9 +104,9 @@ export default function CloseAllModal({ onClose }) {
                 const stillRunning = remaining.includes(p.id);
                 return (
                   <li key={p.id} className={stillRunning ? "" : "closed"}>
-                    <span className="close-item-emoji">{p.emoji}</span> {p.name}
+                    <ProjectMark name={p.name} size={22} /> {p.name}
                     <span className="close-item-status">
-                      {stillRunning ? <span className="spinner" /> : "✓ saved"}
+                      {stillRunning ? <span className="spinner" /> : <><Icon name="check" size={14} /> saved</>}
                     </span>
                   </li>
                 );
@@ -114,8 +115,8 @@ export default function CloseAllModal({ onClose }) {
             {phase === "done" && report && (
               <div className={"report-note" + (report.emailed ? " sent" : "")}>
                 {report.emailed
-                  ? <>📧 Daily report emailed — {report.projects} project{report.projects !== 1 ? "s" : ""} covered.</>
-                  : <>📄 {report.detail}{report.pdf ? <div className="report-path">{report.pdf}</div> : null}</>}
+                  ? <><Icon name="check" size={14} /> Daily report emailed — {report.projects} project{report.projects !== 1 ? "s" : ""} covered.</>
+                  : <><Icon name="file" size={14} /> {report.detail}{report.pdf ? <div className="report-path">{report.pdf}</div> : null}</>}
               </div>
             )}
             {phase === "done" && (

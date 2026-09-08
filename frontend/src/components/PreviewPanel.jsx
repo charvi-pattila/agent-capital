@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import Icon from "./Icon";
 import { api } from "../api";
 import SheetViewer from "./SheetViewer";
 
@@ -74,7 +75,7 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, serve
             type="button"
             className={"seg-btn" + (mode === "url" ? " active" : "")}
             onClick={() => setMode("url")}
-          >🌐 URL</button>
+          ><Icon name="globe" size={14} /> URL</button>
           <button
             type="button"
             className={"seg-btn" + (mode === "file" ? " active" : "")}
@@ -120,7 +121,7 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, serve
             </form>
             {isSelfUrl(url.trim()) && (
               <div className="preview-warning">
-                ⚠️ That's Claude Manager's own URL — you'd be previewing this dashboard inside itself.
+                <Icon name="warning" size={16} /> That's the dashboard's own URL — you'd be previewing this dashboard inside itself.
                 Enter the project app's URL instead.
               </div>
             )}
@@ -144,7 +145,7 @@ export default function PreviewPanel({ projectId, previewUrl, previewFile, serve
     <div className="terminal-container">
       {!previewFile && isSelfUrl(previewUrl) && (
         <div className="preview-warning banner">
-          ⚠️ This preview URL points at Claude Manager itself. Click Edit and set it to the project app's own URL.
+          <Icon name="warning" size={16} /> This preview URL points at the dashboard itself. Click Edit and set it to the project app's own URL.
         </div>
       )}
       <div className="terminal-header">
@@ -212,7 +213,7 @@ function FileBrowser({ projectId, onPick, saving }) {
           const p = path ? `${path}/${e.name}` : e.name;
           return e.dir ? (
             <button type="button" key={e.name} className="file-row" onClick={() => setPath(p)}>
-              📁 {e.name}
+              <Icon name="folder" size={14} /> {e.name}
             </button>
           ) : (
             <button type="button" key={e.name} className="file-row" disabled={saving} onClick={() => onPick(p)}>

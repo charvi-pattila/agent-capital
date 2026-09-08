@@ -1,12 +1,9 @@
 import { useState } from "react";
 
-const EMOJIS = ["🚀", "🎯", "🔧", "📱", "🎨", "🌐", "🤖", "📊", "🎵", "💡", "🔬", "⚙️"];
-
 export default function NewProjectModal({ onClose, onCreate }) {
   const [form, setForm] = useState({
     name: "",
     description: "",
-    emoji: EMOJIS[0],
     path: "",
     first_message: "",
     server_cmd: "",
@@ -26,19 +23,6 @@ export default function NewProjectModal({ onClose, onCreate }) {
       <div className="modal">
         <h2>New Project</h2>
         <form onSubmit={submit}>
-          <div className="form-group">
-            <label>Emoji</label>
-            <div className="emoji-picker">
-              {EMOJIS.map(em => (
-                <button
-                  key={em}
-                  type="button"
-                  className={"emoji-opt" + (form.emoji === em ? " selected" : "")}
-                  onClick={() => setForm(f => ({ ...f, emoji: em }))}
-                >{em}</button>
-              ))}
-            </div>
-          </div>
           <div className="form-group">
             <label>Project Name *</label>
             <input value={form.name} onChange={set("name")} placeholder="e.g. Portfolio Website" autoFocus required />

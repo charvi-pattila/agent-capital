@@ -4,6 +4,7 @@ import { api } from "../api";
 import ProjectCard from "../components/ProjectCard";
 import NewProjectModal from "../components/NewProjectModal";
 import ImportModal from "../components/ImportModal";
+import Icon from "../components/Icon";
 
 export default function Dashboard() {
   const [projects, setProjects] = useState([]);
@@ -50,11 +51,13 @@ export default function Dashboard() {
   };
 
   const q = query.trim().toLowerCase();
-  const visible = q
+  const rank = (p) => (p.status === "running" ? 0 : p.status === "paused" ? 1 : 2);
+  const visible = (q
     ? projects.filter(p =>
         (p.name || "").toLowerCase().includes(q) ||
         (p.description || "").toLowerCase().includes(q))
-    : projects;
+    : projects
+  ).slice().sort((a, b) => rank(a) - rank(b));
 
   return (
     <div>
@@ -69,14 +72,14 @@ export default function Dashboard() {
               className="search-input"
               value={query}
               onChange={e => setQuery(e.target.value)}
-              placeholder="🔍 Search projects..."
+              placeholder="Search projects…"
             />
           )}
-          <button className="btn btn-ghost" onClick={() => setShowImport(true)}>
-            ⤵ Import folders
+          <button className="btn btn-ghost" onClick={() => setShowImport(true)} title="Import folders">
+            <Icon name="folder" size={16} /><span className="btn-label">Import folders</span>
           </button>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-            + New Project
+          <button className="btn btn-primary" onClick={() => setShowModal(true)} title="New project">
+            <Icon name="plus" size={16} /><span className="btn-label">New Project</span>
           </button>
         </div>
       </div>
@@ -85,17 +88,17 @@ export default function Dashboard() {
         <div style={{ color: "var(--text2)", textAlign: "center", paddingTop: 60 }}>Loading...</div>
       ) : projects.length === 0 ? (
         <div className="empty-state">
-          <div style={{ fontSize: 48, marginBottom: 16 }}>🚀</div>
+          <div className="empty-icon"><Icon name="spark" size={40} /></div>
           <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>No projects yet</div>
           <div style={{ color: "var(--text2)", marginBottom: 24 }}>Create a project or import folders you already have</div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-            <button className="btn btn-ghost" onClick={() => setShowImport(true)}>⤵ Import folders</button>
-            <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ New Project</button>
+            <button className="btn btn-ghost" onClick={() => setShowImport(true)}><Icon name="folder" size={16} /> Import folders</button>
+            <button className="btn btn-primary" onClick={() => setShowModal(true)}><Icon name="plus" size={16} /> New Project</button>
           </div>
         </div>
       ) : visible.length === 0 ? (
         <div className="empty-state">
-          <div style={{ fontSize: 32, marginBottom: 12 }}>🔍</div>
+          <div className="empty-icon"><Icon name="search" size={30} /></div>
           <div style={{ color: "var(--text2)" }}>No projects match "{query}"</div>
         </div>
       ) : (

@@ -47,6 +47,12 @@ export const api = {
     body: JSON.stringify({ keys }),
   }).then(r => r.json()),
 
+  typeText: (id, text) => fetch(`${BASE}/projects/${id}/type`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  }).then(r => r.json()),
+
   uploadFile: (id, file) => {
     const fd = new FormData();
     fd.append("file", file, file.name || "pasted-image.png");
@@ -92,6 +98,8 @@ export const api = {
 
   // Running
   getRunning: () => fetch(`${BASE}/running`).then(r => r.json()),
+  getContext: (id) => fetch(`${BASE}/projects/${id}/context`).then(r => r.json()),
+  trimContext: (id) => fetch(`${BASE}/projects/${id}/context/trim`, { method: "POST" }).then(r => r.json()),
 
   // Council
   getCouncil: (id) => fetch(`${BASE}/projects/${id}/council`).then(r => r.json()),
