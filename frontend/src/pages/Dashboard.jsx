@@ -23,7 +23,17 @@ export default function Dashboard() {
   }, []);
 
   const handleCreate = async (data) => {
-    const proj = await api.createProject(data);
+    // Surface failures instead of swallowing them: a 401 (logged out), a 500,
+    // or a network error used to leave the modal open with no feedback at all.
+    let proj;
+    try {
+      proj = await api.createProject(data);
+    } catch (err) {
+      throw new Error(`Could not reach the server (${err.message}).`);
+    }
+    if (!proj || !proj.id) {
+      throw new Error(proj && proj.error ? `Server said: ${proj.error}` : "Server returned no project.");
+    }
     setShowModal(false);
     navigate(`/project/${proj.id}`);
   };

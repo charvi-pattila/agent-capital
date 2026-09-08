@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 export default function NewProjectModal({ onClose, onCreate }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
     name: "",
     description: "",
@@ -12,10 +14,17 @@ export default function NewProjectModal({ onClose, onCreate }) {
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
-    if (!form.name.trim()) return;
-    onCreate(form);
+    if (!form.name.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onCreate(form);
+    } catch (err) {
+      setError(err.message || String(err));
+      setBusy(false);
+    }
   };
 
   return (
@@ -53,9 +62,10 @@ export default function NewProjectModal({ onClose, onCreate }) {
             />
             Start a Claude session right away
           </label>
+          {error && <div className="form-error">{error}</div>}
           <div className="modal-actions">
             <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary">Create Project</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? "Creating…" : "Create Project"}</button>
           </div>
         </form>
       </div>
