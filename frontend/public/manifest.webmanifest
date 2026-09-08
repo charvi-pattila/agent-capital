@@ -1,6 +1,6 @@
 {
-  "name": "Agent Capitol",
-  "short_name": "Capitol",
+  "name": "Agent Capital",
+  "short_name": "Capital",
   "description": "Run and steer Claude Code sessions from your phone or Mac.",
   "id": "/",
   "start_url": "/",

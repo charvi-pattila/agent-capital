@@ -41,11 +41,11 @@ Auth and email-report delivery are both opt-in (`backend/set_password.py`, `back
 Instead of keeping `python server.py` in a foreground terminal, install it as a launchd LaunchAgent: it starts at login, restarts itself if it dies, and the app stays reachable from your phone/Mac.
 
 ```bash
-scripts/install-service.sh              # installs + starts com.agent-capitol.server on :8888
+scripts/install-service.sh              # installs + starts com.agent-capital.server on :8888
 scripts/install-service.sh --port 9000  # or on another port
 ```
 
-The installer renders `launchd/com.agent-capitol.server.plist` with absolute paths (repo root, `venv/bin/python`, `backend/server.py`) into `~/Library/LaunchAgents/`, then bootstraps it into your **gui** login domain (required: desktop notifications go through osascript). It refuses to install while something else — e.g. a foreground `python backend/server.py` — is listening on the port, so stop that first. Re-running it is safe; it reloads the service in place. Needs `frontend/dist` built (`cd frontend && npm run build`) since the service serves it.
+The installer renders `launchd/com.agent-capital.server.plist` with absolute paths (repo root, `venv/bin/python`, `backend/server.py`) into `~/Library/LaunchAgents/`, then bootstraps it into your **gui** login domain (required: desktop notifications go through osascript). It refuses to install while something else — e.g. a foreground `python backend/server.py` — is listening on the port, so stop that first. Re-running it is safe; it reloads the service in place. Needs `frontend/dist` built (`cd frontend && npm run build`) since the service serves it.
 
 Optional `backend/.env` (git-ignored, `KEY=VALUE` lines) is merged into the service environment:
 
@@ -61,9 +61,9 @@ SSL_KEY=/path/privkey.pem
 Day to day:
 
 ```bash
-tail -f ~/Library/Logs/agent-capitol/server.err.log            # request log + tracebacks (stdout in server.out.log)
-launchctl kickstart -k gui/$(id -u)/com.agent-capitol.server   # restart (e.g. after pulling changes)
-launchctl print gui/$(id -u)/com.agent-capitol.server          # status / pid
+tail -f ~/Library/Logs/agent-capital/server.err.log            # request log + tracebacks (stdout in server.out.log)
+launchctl kickstart -k gui/$(id -u)/com.agent-capital.server   # restart (e.g. after pulling changes)
+launchctl print gui/$(id -u)/com.agent-capital.server          # status / pid
 scripts/uninstall-service.sh                                   # stop + remove (logs are kept)
 ```
 
@@ -76,29 +76,29 @@ scripts/setup-linux.sh                                   # deps, venv, UI build,
 scripts/setup-linux.sh --public-url https://pc.tailnet.ts.net   # later: tell the About tab its Tailscale address
 ```
 
-`scripts/install-service-linux.sh` / `uninstall-service-linux.sh` manage just the service (`systemd/agent-capitol.service` is the template; logs via `journalctl -u agent-capitol -f`). The backend itself is portable: macOS-only bits (Terminal.app windows, Notification Center, `.local` names) are skipped on Linux, and `claude`/`tmux` are found on `PATH` (override with `CLAUDE_BIN` / `TMUX_BIN`).
+`scripts/install-service-linux.sh` / `uninstall-service-linux.sh` manage just the service (`systemd/agent-capital.service` is the template; logs via `journalctl -u agent-capital -f`). The backend itself is portable: macOS-only bits (Terminal.app windows, Notification Center, `.local` names) are skipped on Linux, and `claude`/`tmux` are found on `PATH` (override with `CLAUDE_BIN` / `TMUX_BIN`).
 
 ## Mac app (Electron wrapper)
 
-`desktop/` wraps the dashboard in a native macOS window (`Agent Capitol.app`) you can keep in the Dock. It is a thin Electron shell around `http://localhost:8888` — no bundled backend, no code signing.
+`desktop/` wraps the dashboard in a native macOS window (`Agent Capital.app`) you can keep in the Dock. It is a thin Electron shell around `http://localhost:8888` — no bundled backend, no code signing.
 
 ```bash
 cd desktop && npm install
-npm run build          # unsigned .app under desktop/dist/mac*/Agent Capitol.app
+npm run build          # unsigned .app under desktop/dist/mac*/Agent Capital.app
 npm run install-app    # copies it to /Applications (falls back to ~/Applications), replacing any old copy
 npm start              # dev: run unpackaged from the repo
 ```
 
-How it finds the backend: on launch it probes `http://localhost:$AGENT_CAPITOL_PORT` (default 8888). If something is already listening (the launchd service or a foreground `python backend/server.py`) it just opens it and never touches that process. Otherwise it spawns `<repo>/venv/bin/python backend/server.py` itself with `PORT` set, shows a "Starting…" page until the server answers (20s timeout, then the error plus the log path `~/.agent-capitol/logs/desktop-backend.log`), and kills that child again on Quit — only a backend it started itself. `frontend/dist` must be built, since the backend serves it.
+How it finds the backend: on launch it probes `http://localhost:$AGENT_CAPITAL_PORT` (default 8888). If something is already listening (the launchd service or a foreground `python backend/server.py`) it just opens it and never touches that process. Otherwise it spawns `<repo>/venv/bin/python backend/server.py` itself with `PORT` set, shows a "Starting…" page until the server answers (20s timeout, then the error plus the log path `~/.agent-capital/logs/desktop-backend.log`), and kills that child again on Quit — only a backend it started itself. `frontend/dist` must be built, since the backend serves it.
 
-Overrides (env vars win over `~/.agent-capitol/desktop.json`, which wins over the built-in defaults):
+Overrides (env vars win over `~/.agent-capital/desktop.json`, which wins over the built-in defaults):
 
 | env | `desktop.json` key | default |
 |---|---|---|
-| `AGENT_CAPITOL_PORT` | `port` | `8888` |
-| `AGENT_CAPITOL_ROOT` | `root` | repo checkout (`desktop/..` for `npm start`; the absolute path baked in at build time for the packaged app) |
-| `AGENT_CAPITOL_PYTHON` | `python` | `<root>/venv/bin/python` |
-| `AGENT_CAPITOL_SERVER` | `server` | `<root>/backend/server.py` |
+| `AGENT_CAPITAL_PORT` | `port` | `8888` |
+| `AGENT_CAPITAL_ROOT` | `root` | repo checkout (`desktop/..` for `npm start`; the absolute path baked in at build time for the packaged app) |
+| `AGENT_CAPITAL_PYTHON` | `python` | `<root>/venv/bin/python` |
+| `AGENT_CAPITAL_SERVER` | `server` | `<root>/backend/server.py` |
 
 The window remembers its size/position, Cmd+R reloads, View → Toggle Developer Tools opens DevTools, and links to other origins open in your default browser. The icon is generated from `desktop/build/make-icon.py` (`npm run icon`).
 

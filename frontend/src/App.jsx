@@ -33,7 +33,7 @@ function Shell() {
       <nav className="sidebar">
         <div className="sidebar-logo">
           <Icon name="logo" size={20} className="logo-icon" style={{ color: "var(--accent)" }} />
-          <span className="logo-text">Agent Capitol</span>
+          <span className="logo-text">Agent Capital</span>
         </div>
         <div className="sidebar-section">Workspace</div>
         <NavLink to="/" end className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>

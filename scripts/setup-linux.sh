@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-shot bootstrap of Agent Capitol on a fresh Ubuntu machine — written for
+# One-shot bootstrap of Agent Capital on a fresh Ubuntu machine — written for
 # Ubuntu inside WSL2 on a Windows PC used as an always-on server
 # (docs/WINDOWS-SERVER.md), works on a bare Ubuntu/Debian box too.
 #

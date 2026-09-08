@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tailscale-https.sh — give Agent Capitol a stable https:// URL over Tailscale.
+# tailscale-https.sh — give Agent Capital a stable https:// URL over Tailscale.
 #
 # What it does (idempotent; safe to re-run any time):
 #   1. Finds the Tailscale CLI (Mac app bundle first, then PATH).
@@ -7,7 +7,7 @@
 #      manual steps and exits without touching anything.
 #   3. Reads this machine's MagicDNS name (Self.DNSName).
 #   4. Fetches/renews a Let's Encrypt certificate for that name with
-#      `tailscale cert` into ~/.agent-capitol/certs/.
+#      `tailscale cert` into ~/.agent-capital/certs/.
 #   5. Writes SSL_CERT= / SSL_KEY= into backend/.env (creates the file if
 #      missing, replaces existing values, never duplicates keys).
 #   6. Prints the final URL and the restart command.
@@ -17,8 +17,8 @@
 # certificate automatically when it is inside the renewal window.
 #
 # Overrides (environment variables):
-#   AGENT_CAPITOL_ENV_FILE   path of the env file to update  (default: <repo>/backend/.env)
-#   AGENT_CAPITOL_CERT_DIR   where to put the cert/key       (default: ~/.agent-capitol/certs)
+#   AGENT_CAPITAL_ENV_FILE   path of the env file to update  (default: <repo>/backend/.env)
+#   AGENT_CAPITAL_CERT_DIR   where to put the cert/key       (default: ~/.agent-capital/certs)
 #   TAILSCALE_BIN            explicit path to the tailscale CLI
 #   PORT                     port used in the printed URL    (default: PORT= from env file, else 8888)
 #
@@ -27,9 +27,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="${AGENT_CAPITOL_ENV_FILE:-$REPO_ROOT/backend/.env}"
-CERT_DIR="${AGENT_CAPITOL_CERT_DIR:-$HOME/.agent-capitol/certs}"
-SERVICE_LABEL="com.agent-capitol.server"
+ENV_FILE="${AGENT_CAPITAL_ENV_FILE:-$REPO_ROOT/backend/.env}"
+CERT_DIR="${AGENT_CAPITAL_CERT_DIR:-$HOME/.agent-capital/certs}"
+SERVICE_LABEL="com.agent-capital.server"
 
 usage() {
   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -184,7 +184,7 @@ URL_PORT="${PORT:-${ENV_PORT:-8888}}"
 
 cat <<MSG
 
-Done. Agent Capitol URL (from any device on your tailnet):
+Done. Agent Capital URL (from any device on your tailnet):
 
     https://$DNS_NAME:$URL_PORT
 

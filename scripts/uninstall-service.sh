@@ -1,12 +1,12 @@
 #!/bin/bash
-# Stop and remove the Agent Capitol launchd LaunchAgent.
+# Stop and remove the Agent Capital launchd LaunchAgent.
 #
 # Usage: scripts/uninstall-service.sh [--label NAME]
 #
-# Logs in ~/Library/Logs/agent-capitol/ are left in place.
+# Logs in ~/Library/Logs/agent-capital/ are left in place.
 set -euo pipefail
 
-LABEL="com.agent-capitol.server"
+LABEL="com.agent-capital.server"
 while [ $# -gt 0 ]; do
     case "$1" in
         --label) [ $# -ge 2 ] || { echo "error: --label needs a value" >&2; exit 1; }; LABEL="$2"; shift 2 ;;
@@ -35,4 +35,4 @@ if [ -f "$PLIST" ]; then
 else
     echo "No plist at $PLIST"
 fi
-echo "Done. Logs kept in $HOME/Library/Logs/agent-capitol/"
+echo "Done. Logs kept in $HOME/Library/Logs/agent-capital/"

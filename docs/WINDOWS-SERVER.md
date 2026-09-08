@@ -1,4 +1,4 @@
-# Running Agent Capitol on a Windows PC as an always-on server
+# Running Agent Capital on a Windows PC as an always-on server
 
 The goal: a spare Windows computer stays on at home, runs the backend and your
 Claude Code sessions, and your phone reaches it from anywhere over Tailscale.
@@ -41,8 +41,8 @@ In the Ubuntu window:
 
 ```bash
 sudo apt-get install -y git
-git clone https://github.com/charvi-pattila/agent-capitol.git ~/code/my-claude/agent-capitol
-cd ~/code/my-claude/agent-capitol
+git clone https://github.com/charvi-pattila/agent-capitol.git ~/code/my-claude/agent-capital
+cd ~/code/my-claude/agent-capital
 scripts/setup-linux.sh
 ```
 
@@ -57,7 +57,7 @@ wsl --shutdown
 
 Reopen Ubuntu and run `scripts/setup-linux.sh` again — it skips everything that
 is done and installs the service. You should see
-`OK: agent-capitol is running ... on http://localhost:8888`.
+`OK: agent-capital is running ... on http://localhost:8888`.
 
 Then log Claude Code in on this machine, once:
 
@@ -94,12 +94,12 @@ day, and rely on Parts 4 and 5 to bring everything back after the reboot.
 
 WSL does not start at boot on its own, and it stops when nothing is running
 inside it. With systemd enabled (Part 2) the service keeps Ubuntu alive; this
-step starts Ubuntu after a reboot. PowerShell (normal user):
+step starts Ubuntu after a reboot. PowerShell **as Administrator** (`-RunLevel Highest` fails with "Access denied" from a normal shell):
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu --exec /bin/true"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName "Agent Capitol WSL boot" -Action $action -Trigger $trigger -RunLevel Highest
+Register-ScheduledTask -TaskName "Agent Capital WSL boot" -Action $action -Trigger $trigger -RunLevel Highest
 ```
 
 That runs at **logon**, so Windows has to sign in by itself after a reboot:
@@ -138,7 +138,7 @@ On the **Windows** side (not inside Ubuntu):
    (Ubuntu window):
 
    ```bash
-   cd ~/code/my-claude/agent-capitol
+   cd ~/code/my-claude/agent-capital
    scripts/setup-linux.sh --public-url https://<pc-name>.<tailnet>.ts.net
    ```
 
@@ -167,9 +167,9 @@ Recreating the projects on the server is usually less work.
 ## Day to day (Ubuntu window)
 
 ```bash
-journalctl -u agent-capitol -f                 # live log
-systemctl status agent-capitol                 # running? pid?
-sudo systemctl restart agent-capitol           # after git pull (closes running sessions first, like Close All)
+journalctl -u agent-capital -f                 # live log
+systemctl status agent-capital                 # running? pid?
+sudo systemctl restart agent-capital           # after git pull (closes running sessions first, like Close All)
 tmux attach -t claude_<project-id>             # look at a session directly; Ctrl-B d to detach
 scripts/uninstall-service-linux.sh             # remove the service
 ```
@@ -182,7 +182,7 @@ restarts the service).
 - **`http://localhost:8888` works on the PC but the Tailscale URL gives a 502.**
   Windows → WSL localhost forwarding dropped (it sometimes does after
   `wsl --shutdown`). Restarting the service fixes it: `sudo systemctl restart
-  agent-capitol`. If it keeps happening, switch WSL to mirrored networking: create
+  agent-capital`. If it keeps happening, switch WSL to mirrored networking: create
   `C:\Users\<you>\.wslconfig` with
 
   ```ini
@@ -200,7 +200,7 @@ restarts the service).
   logged in, or not installed for the user the service runs as. Run `claude` in
   the Ubuntu window as that user.
 - **Ubuntu is not running after a reboot.** Check the scheduled task ran
-  (Task Scheduler → Task Scheduler Library → *Agent Capitol WSL boot* → Last Run
+  (Task Scheduler → Task Scheduler Library → *Agent Capital WSL boot* → Last Run
   Result), and that Windows actually signed in (Part 4).
 - **The service is up but the About tab has no public address.** Re-run
   `scripts/setup-linux.sh --public-url https://...` — or the backend can read it

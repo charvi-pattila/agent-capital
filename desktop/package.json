@@ -1,0 +1,30 @@
+{
+  "name": "agent-capital-desktop",
+  "productName": "Agent Capital",
+  "version": "0.1.0",
+  "description": "macOS desktop wrapper for Agent Capital (Electron)",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "icon": "../venv/bin/python build/make-icon.py",
+    "build": "electron-builder --mac --dir",
+    "install-app": "bash scripts/install-app.sh"
+  },
+  "devDependencies": {
+    "electron": "31.7.7",
+    "electron-builder": "24.13.3"
+  },
+  "build": {
+    "appId": "com.agent-capital.desktop",
+    "productName": "Agent Capital",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "loading.html", "package.json"],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "identity": null,
+      "target": ["dir"]
+    }
+  }
+}

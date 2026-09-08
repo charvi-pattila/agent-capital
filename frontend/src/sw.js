@@ -1,4 +1,4 @@
-/* Service worker for Agent Capitol (built by vite-plugin-pwa, injectManifest).
+/* Service worker for Agent Capital (built by vite-plugin-pwa, injectManifest).
  *
  * Rules:
  *  - /api/**  : NOT intercepted at all. No route matches, so the browser talks to

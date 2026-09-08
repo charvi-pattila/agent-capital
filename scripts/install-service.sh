@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install (or reinstall) the Agent Capitol backend as a macOS launchd
+# Install (or reinstall) the Agent Capital backend as a macOS launchd
 # LaunchAgent so it starts at login and is restarted if it dies.
 #
 # Usage:
@@ -8,7 +8,7 @@
 #   --port N        Listen on port N (default: PORT from backend/.env, else 8888)
 #   --env-file P    KEY=VALUE file merged into the service environment
 #                   (default: backend/.env if it exists)
-#   --label NAME    launchd label (default: com.agent-capitol.server).
+#   --label NAME    launchd label (default: com.agent-capital.server).
 #                   Only useful for running a second, test copy.
 #
 # The job is bootstrapped into the per-user *gui* domain (not a system daemon)
@@ -20,11 +20,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON="$REPO_ROOT/venv/bin/python"
 SERVER="$REPO_ROOT/backend/server.py"
-TEMPLATE="$REPO_ROOT/launchd/com.agent-capitol.server.plist"
-LABEL="com.agent-capitol.server"
+TEMPLATE="$REPO_ROOT/launchd/com.agent-capital.server.plist"
+LABEL="com.agent-capital.server"
 ENV_FILE="$REPO_ROOT/backend/.env"
 PORT_OVERRIDE=""
-LOG_DIR="$HOME/Library/Logs/agent-capitol"
+LOG_DIR="$HOME/Library/Logs/agent-capital"
 UID_NUM="$(id -u)"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -58,7 +58,7 @@ mkdir -p "$PLIST_DIR" "$LOG_DIR"
 # 1. Render the plist: fill placeholders, merge env file, apply --port.
 #    Done in Python (plistlib) so values are XML-escaped correctly.
 # ---------------------------------------------------------------------------
-RENDERED="$(mktemp -t agent-capitol-plist)"
+RENDERED="$(mktemp -t agent-capital-plist)"
 trap 'rm -f "$RENDERED"' EXIT
 
 LABEL="$LABEL" PYTHON="$PYTHON" SERVER="$SERVER" REPO_ROOT="$REPO_ROOT" LOG_DIR="$LOG_DIR" \

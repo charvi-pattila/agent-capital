@@ -1,9 +1,9 @@
-# Template for the Agent Capitol systemd unit (Linux / Ubuntu under WSL2).
+# Template for the Agent Capital systemd unit (Linux / Ubuntu under WSL2).
 # Do not install this file directly: run scripts/install-service-linux.sh,
 # which fills in the placeholder values and writes the result to
-# /etc/systemd/system/agent-capitol.service.
+# /etc/systemd/system/agent-capital.service.
 [Unit]
-Description=Agent Capitol backend (Flask on port __PORT__)
+Description=Agent Capital backend (Flask on port __PORT__)
 After=network-online.target
 Wants=network-online.target
 
@@ -30,7 +30,7 @@ Environment=LANG=en_US.UTF-8
 Environment=PYTHONUNBUFFERED=1
 # Optional KEY=VALUE file: PORT, HOST, PUBLIC_URL, SSL_CERT/SSL_KEY, CONTEXT_* ...
 EnvironmentFile=-__ENV_FILE__
-# Logs: journalctl -u agent-capitol -f
+# Logs: journalctl -u agent-capital -f
 StandardOutput=journal
 StandardError=journal
 

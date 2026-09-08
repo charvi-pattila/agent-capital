@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install (or reinstall) the Agent Capitol backend as a systemd service on
+# Install (or reinstall) the Agent Capital backend as a systemd service on
 # Linux — written for Ubuntu inside WSL2 (see docs/WINDOWS-SERVER.md), works on
 # any systemd distro. Starts at boot, restarts if it dies.
 #
@@ -18,8 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON="$REPO_ROOT/venv/bin/python"
 SERVER="$REPO_ROOT/backend/server.py"
-TEMPLATE="$REPO_ROOT/systemd/agent-capitol.service"
-UNIT_NAME="agent-capitol"
+TEMPLATE="$REPO_ROOT/systemd/agent-capital.service"
+UNIT_NAME="agent-capital"
 UNIT="/etc/systemd/system/$UNIT_NAME.service"
 ENV_FILE="$REPO_ROOT/backend/.env"
 PORT_OVERRIDE=""

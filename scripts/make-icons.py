@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the PWA / home-screen icons for Agent Capitol.
+"""Generate the PWA / home-screen icons for Agent Capital.
 
 Run from the repo root:  ./venv/bin/python scripts/make-icons.py
 

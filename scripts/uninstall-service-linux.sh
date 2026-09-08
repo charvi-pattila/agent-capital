@@ -1,8 +1,8 @@
 #!/bin/bash
-# Stop, disable and remove the Agent Capitol systemd service (Linux).
+# Stop, disable and remove the Agent Capital systemd service (Linux).
 # Usage: scripts/uninstall-service-linux.sh
 set -euo pipefail
-UNIT_NAME="agent-capitol"
+UNIT_NAME="agent-capital"
 UNIT="/etc/systemd/system/$UNIT_NAME.service"
 if [ -f "$UNIT" ] || systemctl list-unit-files "$UNIT_NAME.service" --no-legend 2>/dev/null | grep -q .; then
     echo "Stopping $UNIT_NAME (needs sudo) ..."

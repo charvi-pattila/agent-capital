@@ -2,7 +2,7 @@
 
 ## Why
 
-Agent Capitol is served by the Flask backend on port 8888 and reached from an
+Agent Capital is served by the Flask backend on port 8888 and reached from an
 iPhone. On a plain LAN that has two recurring problems:
 
 - **The Mac's LAN IP drifts.** Every new DHCP lease or network change means a
@@ -44,7 +44,7 @@ tailnet can see the Mac.
    ```
 
    It finds the CLI, reads the Mac's MagicDNS name, fetches the certificate
-   into `~/.agent-capitol/certs/`, and writes `SSL_CERT=` / `SSL_KEY=` into
+   into `~/.agent-capital/certs/`, and writes `SSL_CERT=` / `SSL_KEY=` into
    `backend/.env`. If Tailscale is not installed or not signed in it stops and
    prints exactly what to do. Re-running it is always safe.
 
@@ -52,7 +52,7 @@ tailnet can see the Mac.
    `PORT`, `HOST`, `SSL_CERT`, `SSL_KEY` from its environment at startup):
    - **launchd service:** `backend/.env` is merged into the service's
      environment by `scripts/install-service.sh`, so run that once after the
-     script, then `launchctl kickstart -k gui/$(id -u)/com.agent-capitol.server`
+     script, then `launchctl kickstart -k gui/$(id -u)/com.agent-capital.server`
      for any later restart.
    - **Foreground:** stop it with Ctrl-C and start it again with the variables
      loaded, e.g. `set -a; source backend/.env; set +a; ./venv/bin/python backend/server.py`.
@@ -80,7 +80,7 @@ re-running the script and restarting the server:
 
 ```bash
 scripts/tailscale-https.sh --renew
-launchctl kickstart -k gui/$(id -u)/com.agent-capitol.server   # or restart the foreground server
+launchctl kickstart -k gui/$(id -u)/com.agent-capital.server   # or restart the foreground server
 ```
 
 The script prints the expiry date each time it runs. A cron/launchd job that
@@ -97,7 +97,7 @@ runs it monthly is a reasonable follow-up.
 | Page loads but the terminal mirror stays blank | The SSE stream (`/api/projects/<id>/terminal`) is being buffered or cut. Confirm you are hitting the Flask server directly (no proxy in front of it); it already sends `Cache-Control: no-cache` and `X-Accel-Buffering: no`. Verified locally: `curl -k -N https://127.0.0.1:8888/api/projects/<id>/terminal` streams `data:` lines over TLS. |
 | Browser warns that the certificate expired | Run `scripts/tailscale-https.sh --renew` and restart the server. |
 | Browser warns about the certificate name | You opened the `.local` or IP URL; the cert is only valid for the `.ts.net` name. Use the Tailscale URL. |
-| Server does not start after adding SSL_* | Check `SSL_CERT`/`SSL_KEY` in `backend/.env` point at existing files (`ls -l ~/.agent-capitol/certs/`) and that the launchd env was re-merged with `scripts/install-service.sh`. |
+| Server does not start after adding SSL_* | Check `SSL_CERT`/`SSL_KEY` in `backend/.env` point at existing files (`ls -l ~/.agent-capital/certs/`) and that the launchd env was re-merged with `scripts/install-service.sh`. |
 
 ## Fallback: ngrok (public tunnel)
 

@@ -487,7 +487,7 @@ def clear_unread(pid):
 def notify_macos(title, message):
     """Desktop notification. macOS: Notification Center via osascript. Linux:
     there is usually no desktop (WSL server), so it goes to the log instead —
-    `journalctl -u agent-capitol` shows them — unless notify-send exists."""
+    `journalctl -u agent-capital` shows them — unless notify-send exists."""
     def esc(s):
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -1324,7 +1324,7 @@ def _review_loop(pid, path, diff_text, council, attempt):
 # user can correct any one of them mid-flight without touching the others. When
 # they're done the branches are merged back into the base branch together.
 
-SPLIT_ROOT = Path.home() / ".agent-capitol-splits"
+SPLIT_ROOT = Path.home() / ".agent-capital-splits"
 SPLIT_MAX_BRANCHES = 6
 SPLIT_DEFAULT_BRANCHES = 3
 SPLIT_CHECK_INTERVAL = 8    # seconds between agent-status sweeps

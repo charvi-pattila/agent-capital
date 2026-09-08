@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Template for the Agent Capitol launchd LaunchAgent.
+  Template for the Agent Capital launchd LaunchAgent.
   Do not install this file directly: run scripts/install-service.sh, which
   replaces the __PLACEHOLDER__ values with absolute paths, merges backend/.env
   into EnvironmentVariables, and writes the result to
-  ~/Library/LaunchAgents/com.agent-capitol.server.plist.
+  ~/Library/LaunchAgents/com.agent-capital.server.plist.
 -->
 <plist version="1.0">
 <dict>
@@ -29,6 +29,12 @@
     <!-- Minimum seconds between restarts (avoids a tight crash loop). -->
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <!-- On stop, server.py closes every running Claude session gracefully
+         (save a summary, then kill tmux) — the same path as Close All — which
+         can take a couple of minutes. launchd's default is to SIGKILL after 20s,
+         which cut that short and left the tmux sessions orphaned (seen 09-08). -->
+    <key>ExitTimeOut</key>
+    <integer>180</integer>
 
     <key>StandardOutPath</key>
     <string>__LOG_DIR__/server.out.log</string>
