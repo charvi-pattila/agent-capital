@@ -90,17 +90,33 @@ Windows Update will still reboot occasionally. You cannot fully prevent that;
 set **Settings → Windows Update → Advanced → Active hours** to cover your working
 day, and rely on Parts 4 and 5 to bring everything back after the reboot.
 
-## Part 4 — Windows: boot Ubuntu automatically
+## Part 4 — Windows: keep Ubuntu running and boot it automatically
 
-WSL does not start at boot on its own, and it stops when nothing is running
-inside it. With systemd enabled (Part 2) the service keeps Ubuntu alive; this
-step starts Ubuntu after a reboot. PowerShell **as Administrator** (`-RunLevel Highest` fails with "Access denied" from a normal shell):
+WSL does not start at boot on its own, and it **shuts Ubuntu down a few seconds
+after the last Ubuntu window closes** — systemd running inside does not keep it
+alive (verified 2026-09-09: closing the terminal took the service down). So one
+scheduled task does both jobs: it starts Ubuntu at logon and holds a tiny
+process open inside it forever. PowerShell **as Administrator** (`-RunLevel
+Highest` fails with "Access denied" from a normal shell):
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu --exec /bin/true"
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName "Agent Capital WSL boot" -Action $action -Trigger $trigger -RunLevel Highest
+$action   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu --exec sleep infinity"
+$trigger  = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "Agent Capital WSL keepalive" -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest
+Start-ScheduledTask -TaskName "Agent Capital WSL keepalive"
 ```
+
+`-ExecutionTimeLimit 0` matters: the default kills a task after 3 days. Also
+stop WSL from idling out the whole VM — create `C:\Users\<you>\.wslconfig`:
+
+```ini
+[wsl2]
+vmIdleTimeout=-1
+```
+
+Check: close every Ubuntu window, wait 30 seconds, open <http://localhost:8888>
+on the PC. It should still load.
 
 That runs at **logon**, so Windows has to sign in by itself after a reboot:
 
@@ -200,7 +216,7 @@ restarts the service).
   logged in, or not installed for the user the service runs as. Run `claude` in
   the Ubuntu window as that user.
 - **Ubuntu is not running after a reboot.** Check the scheduled task ran
-  (Task Scheduler → Task Scheduler Library → *Agent Capital WSL boot* → Last Run
+  (Task Scheduler → Task Scheduler Library → *Agent Capital WSL keepalive* → Last Run
   Result), and that Windows actually signed in (Part 4).
 - **The service is up but the About tab has no public address.** Re-run
   `scripts/setup-linux.sh --public-url https://...` — or the backend can read it
