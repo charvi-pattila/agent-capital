@@ -18,7 +18,10 @@ export default defineConfig({
       injectRegister: 'auto',
       manifest: false,
       injectManifest: {
-        globPatterns: ['**/*.{js,css,html,png,svg,webmanifest}'],
+        // index.html is deliberately NOT precached: a precached shell is served
+        // for "/" even when logged out (bypassing the server's login redirect),
+        // which showed a blank app on the phone. Navigations use NetworkFirst.
+        globPatterns: ['**/*.{js,css,png,svg,webmanifest}'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // exceljs/xlsx chunks are ~1MB
       },
     }),

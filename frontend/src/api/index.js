@@ -1,5 +1,17 @@
 const BASE = "/api";
 
+// Every API call goes through here so a 401 (login cookie missing or expired)
+// sends the browser to the login page instead of leaving a blank app.
+function fetch(url, opts) {
+  return window.fetch(url, opts).then(r => {
+    if (r.status === 401 && !window.location.pathname.startsWith("/login")) {
+      window.location.assign("/login");
+      return new Promise(() => {}); // navigation is happening; never resolve
+    }
+    return r;
+  });
+}
+
 export const api = {
   // Projects
   getProjects: () => fetch(`${BASE}/projects`).then(r => r.json()),

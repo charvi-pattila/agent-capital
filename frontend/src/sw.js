@@ -25,5 +25,10 @@ const isApi = (url) => url.pathname.startsWith('/api/')
 
 registerRoute(
   ({ request, url }) => request.mode === 'navigate' && !isApi(url),
-  new NetworkFirst({ cacheName: 'pages', networkTimeoutSeconds: 5 }),
+  new NetworkFirst({
+    cacheName: 'pages',
+    networkTimeoutSeconds: 5,
+    // Don't cache the login redirect as if it were the app page.
+    plugins: [{ cacheWillUpdate: async ({ response }) => (response && response.status === 200 && !response.redirected ? response : null) }],
+  }),
 )

@@ -77,6 +77,11 @@ else:
     app.secret_key = secrets.token_hex(32)
     SECRET_KEY_PATH.write_text(app.secret_key)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
+# Stay logged in for 30 days. Without this the cookie is a browser-session
+# cookie, which iOS drops whenever the home-screen app is closed - the phone
+# then silently gets 401s on every API call while the cached app shell
+# still renders, so it looks like the app "does not open".
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 # No SESSION_COOKIE_SECURE: this is served over plain HTTP on the LAN (see
 # serving-setup notes) — fine for a trusted home network, not for the open internet.
 
@@ -3081,6 +3086,7 @@ def login():
         stored = AUTH_HASH_PATH.read_text().strip() if AUTH_HASH_PATH.exists() else None
         if stored and check_password_hash(stored, request.form.get("password", "")):
             session["authed"] = True
+            session.permanent = True
             return redirect("/")
         return LOGIN_PAGE.format(error='<div class="err">Wrong password.</div>'), 401
     return LOGIN_PAGE.format(error="")
@@ -3092,6 +3098,10 @@ def logout():
     return redirect("/login")
 
 
+_PUBLIC_FILES = frozenset({"/sw.js", "/registerSW.js", "/manifest.webmanifest", "/favicon.png",
+                           "/apple-touch-icon.png", "/vite.svg"})
+
+
 @app.before_request
 def require_login():
     # AUTH_HASH_PATH is checked fresh on every request (not cached at startup), so
@@ -3099,6 +3109,12 @@ def require_login():
     if not AUTH_HASH_PATH.exists():
         return
     if request.path in ("/login", "/logout") or session.get("authed"):
+        return
+    # The built frontend's static files are public code, not data. Gating them
+    # broke the installed PWA: with the cookie gone, the service worker's asset
+    # fetches were redirected to the login *HTML* and cached as if they were
+    # the JS/CSS, leaving a blank app even after logging back in.
+    if request.path.startswith(("/assets/", "/icons/")) or request.path in _PUBLIC_FILES:
         return
     if request.path.startswith("/api/"):
         return jsonify({"error": "unauthorized"}), 401
