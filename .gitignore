@@ -12,7 +12,7 @@ data/
 
 .DS_Store
 
-# Service env (NOTIFY_PHONE, SSL_CERT/SSL_KEY, PORT...) — see README "Run as a background service"
+# Service env (NOTIFY_NAME, SSL_CERT/SSL_KEY, PORT...) — see README "Run as a background service"
 backend/.env
 
 # Desktop (Electron) build output

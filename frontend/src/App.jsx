@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, NavLink, useLocation, useNavigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Project from "./pages/Project";
 import Running from "./pages/Running";
 import CloseAllModal from "./components/CloseAllModal";
+import AlertsModal from "./components/AlertsModal";
 import Icon from "./components/Icon";
 import { api } from "./api";
 import "./App.css";
@@ -13,10 +14,23 @@ import "./App.css";
 // inside the router — hence App wraps Shell rather than rendering this itself.
 function Shell() {
   const [showCloseModal, setShowCloseModal] = useState(false);
+  const [showAlerts, setShowAlerts] = useState(false);
   const [runningCount, setRunningCount] = useState(0);
   const [unreadCount, setUnreadCount] = useState(0);
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const onProject = pathname.startsWith("/project/");
+
+  // Tapping a phone notification: the service worker focuses this window and
+  // asks it to go to the project (sw.js notificationclick).
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (e) => {
+      if (e.data && e.data.type === "navigate" && typeof e.data.url === "string") navigate(e.data.url);
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [navigate]);
 
   useEffect(() => {
     const poll = () => api.getRunning().then(list => {
@@ -50,6 +64,14 @@ function Shell() {
         <div className="sidebar-footer">
           <button
             className="btn btn-ghost btn-sm btn-block"
+            onClick={() => setShowAlerts(true)}
+            disabled={showAlerts}
+            title="Phone notifications"
+          >
+            <Icon name="bell" size={16} /> Alerts
+          </button>
+          <button
+            className="btn btn-ghost btn-sm btn-block"
             onClick={() => setShowCloseModal(true)}
             disabled={showCloseModal}
           >
@@ -65,6 +87,7 @@ function Shell() {
         </Routes>
       </main>
       {showCloseModal && <CloseAllModal onClose={() => setShowCloseModal(false)} />}
+      {showAlerts && <AlertsModal onClose={() => setShowAlerts(false)} />}
     </div>
   );
 }

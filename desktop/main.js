@@ -18,7 +18,7 @@ const path = require('path');
 // ---------------------------------------------------------------------------
 
 // Absolute repo path baked in for the packaged app (personal single-machine app).
-const DEFAULT_REPO_ROOT = '/Users/charvipattila/code/my-claude/agent-capitol';
+const DEFAULT_REPO_ROOT = '/Users/charvipattila/code/my-claude/agent-capital';
 const CONFIG_PATH = path.join(os.homedir(), '.agent-capital', 'desktop.json');
 
 function readUserConfig() {

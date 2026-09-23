@@ -41,7 +41,7 @@ In the Ubuntu window:
 
 ```bash
 sudo apt-get install -y git
-git clone https://github.com/charvi-pattila/agent-capitol.git ~/code/my-claude/agent-capital
+git clone https://github.com/charvi-pattila/agent-capital.git ~/code/my-claude/agent-capital
 cd ~/code/my-claude/agent-capital
 scripts/setup-linux.sh
 ```
@@ -161,7 +161,10 @@ On the **Windows** side (not inside Ubuntu):
 On the **iPhone**: install Tailscale from the App Store, sign in with the same
 account, toggle it on (it stays on; battery impact is negligible). Open the
 `https://...ts.net` URL in Safari, log in with the dashboard password, then
-Share → **Add to Home Screen**.
+Share → **Add to Home Screen**. Open it from the Home Screen icon, tap
+**Alerts** in the bottom bar, type your name, **Turn on**, allow notifications,
+then **Send test** — that is the "needs your response" push (README → Phone
+notifications). It only works from the installed app, not a Safari tab.
 
 Since the certificate and TLS are handled by `tailscale serve`, the
 `scripts/tailscale-https.sh` route from `docs/REMOTE-ACCESS.md` is not needed

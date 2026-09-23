@@ -506,6 +506,167 @@ def notify_macos(title, message):
         subprocess.run(["notify-send", title, clean], capture_output=True)
 
 
+# ── Phone notifications (Web Push) ───────────────────────────────────────────
+# notify_macos() only reaches the machine the backend runs on — which is now a
+# headless Windows/WSL box, so nothing reached the phone. Web Push goes through
+# the browser's own push service (Apple's for the iPhone home-screen app,
+# Google's for Chrome) to every device that turned alerts on in the dashboard
+# (bell button, AlertsModal.jsx). The message is always the same shape:
+# "Hey <name>, Agent Capital" / "<project> needs your response: <detail>".
+#
+# iOS only allows push for an installed (Add to Home Screen) web app, and only
+# from a user gesture — the modal handles both. Keys + subscriptions live in
+# data/push/ (git-ignored): the VAPID key pair identifies this server to the
+# push services and is generated on first use; losing it invalidates every
+# subscription, so back it up along with data/ when moving hosts.
+try:
+    from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid, b64urlencode
+    from cryptography.hazmat.primitives import serialization
+    PUSH_AVAILABLE = True
+except ImportError:  # pip install -r requirements.txt (pywebpush)
+    PUSH_AVAILABLE = False
+
+PUSH_DIR = DATA_DIR.parent / "push"
+VAPID_KEY_PATH = PUSH_DIR / "vapid_private.pem"
+PUSH_SUBS_PATH = PUSH_DIR / "subscriptions.json"
+PUSH_SETTINGS_PATH = PUSH_DIR / "settings.json"
+# VAPID "sub" claim — a contact address the push services may use about abuse.
+PUSH_CONTACT = os.environ.get("PUSH_CONTACT", "mailto:agent-capital@localhost")
+_push_lock = threading.Lock()
+_vapid = None
+
+
+def _vapid_keys():
+    global _vapid
+    if not PUSH_AVAILABLE:
+        return None
+    with _push_lock:
+        if _vapid is None:
+            PUSH_DIR.mkdir(parents=True, exist_ok=True)
+            if VAPID_KEY_PATH.exists():
+                _vapid = Vapid.from_file(str(VAPID_KEY_PATH))
+            else:
+                _vapid = Vapid()
+                _vapid.generate_keys()
+                _vapid.save_key(str(VAPID_KEY_PATH))
+        return _vapid
+
+
+def push_public_key():
+    """The applicationServerKey the browser needs to subscribe (base64url,
+    uncompressed P-256 point)."""
+    v = _vapid_keys()
+    if v is None:
+        return None
+    raw = v.public_key.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    return b64urlencode(raw)
+
+
+def _load_push_subs():
+    try:
+        subs = json.loads(PUSH_SUBS_PATH.read_text())
+        return subs if isinstance(subs, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_push_subs(subs):
+    PUSH_DIR.mkdir(parents=True, exist_ok=True)
+    PUSH_SUBS_PATH.write_text(json.dumps(subs, indent=2))
+
+
+def load_push_settings():
+    try:
+        return json.loads(PUSH_SETTINGS_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_push_settings(settings):
+    PUSH_DIR.mkdir(parents=True, exist_ok=True)
+    PUSH_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+
+
+def push_greeting_name():
+    """Who the notification greets: set in the alerts modal, or NOTIFY_NAME in
+    backend/.env as a fallback."""
+    return (load_push_settings().get("name") or os.environ.get("NOTIFY_NAME") or "").strip()
+
+
+def push_payload(project_name, detail, pid=None):
+    name = push_greeting_name()
+    body = f"{project_name} needs your response"
+    clean = " ".join((detail or "").split())[:160]
+    if clean:
+        body += f": {clean}"
+    return {
+        "title": f"Hey {name}, Agent Capital" if name else "Hey, Agent Capital",
+        "body": body,
+        "tag": f"project-{pid}" if pid else "agent-capital",
+        "url": f"/project/{pid}" if pid else "/running",
+    }
+
+
+def _push_send(payload, only_endpoint=None):
+    """Deliver one payload to every subscription (or just one). Returns
+    (sent, errors). Subscriptions the push service reports gone (404/410 —
+    the user revoked permission or deleted the app) are dropped."""
+    subs = _load_push_subs()
+    if only_endpoint:
+        subs = [s for s in subs if s.get("endpoint") == only_endpoint]
+    sent, errors, dead = 0, [], []
+    for sub in subs:
+        try:
+            webpush(
+                subscription_info={"endpoint": sub["endpoint"], "keys": sub["keys"]},
+                data=json.dumps(payload),
+                vapid_private_key=_vapid_keys(),
+                vapid_claims={"sub": PUSH_CONTACT},  # fresh dict: pywebpush adds aud/exp to it
+                ttl=3600,
+                headers={"Urgency": "high"},
+                timeout=10,
+            )
+            sent += 1
+        except WebPushException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (404, 410):
+                dead.append(sub["endpoint"])
+            errors.append(f"{status or 'error'}: {str(e)[:200]}")
+            print(f"[push] failed ({status}) for {sub.get('label') or sub['endpoint'][:40]}: {e}", flush=True)
+        except Exception as e:  # DNS down, timeout, bad key…
+            errors.append(str(e)[:200])
+            print(f"[push] error: {e}", flush=True)
+    if dead:
+        with _push_lock:
+            _save_push_subs([s for s in _load_push_subs() if s.get("endpoint") not in dead])
+    return sent, errors
+
+
+def notify_phone(project_name, detail, pid=None):
+    """Push "<project> needs your response" to every subscribed device.
+    Fire-and-forget: push services can take seconds and this is called from
+    the watchdog thread and reply watchers."""
+    if not PUSH_AVAILABLE or not _load_push_subs():
+        return
+    payload = push_payload(project_name, detail, pid)
+    threading.Thread(target=_push_send, args=(payload,), daemon=True).start()
+
+
+def notify_needs_response(pid, project_name, detail):
+    """Desktop + phone, and remember that this pane state has been announced so
+    the blocked watchdog doesn't repeat it 90s later (see _blocked_tick)."""
+    notify_macos(project_name, detail)
+    notify_phone(project_name, detail, pid)
+    body = pane_body(capture_pane(pid))
+    with _lock:
+        watch = _pane_watch.get(pid)
+        if watch and watch["body"] == body:
+            watch["pushed"] = True
+        else:
+            _pane_watch[pid] = {"body": body, "changed_at": datetime.now().timestamp(), "pushed": True}
+
+
 def wait_for_stable_reply(pid, message):
     prev = ""
     stable = 0
@@ -537,7 +698,7 @@ def send_to_session(pid, message, reply_id, project_name, notify=True):
     text = wait_for_stable_reply(pid, message)
     update_message(pid, reply_id, {"text": text, "status": "done"})
     if notify:
-        notify_macos(project_name, text)
+        notify_needs_response(pid, project_name, text)
         mark_unread(pid)
 
     meta = load_meta(pid)
@@ -831,6 +992,7 @@ def _save_session_summary(pid, notify=True, prompt=None):
 
 BLOCKED_CHECK_INTERVAL = 15  # seconds
 IDLE_THRESHOLD = 90          # seconds unchanged before flagging as blocked
+PROMPT_PUSH_THRESHOLD = 20   # a y/n or menu prompt sitting this long is waiting on the user: push now
 
 # Common Claude Code CLI confirmation/choice prompts — matching one gives a more
 # specific reason than the generic idle fallback.
@@ -839,12 +1001,23 @@ BLOCKED_PROMPT_RE = re.compile(
     re.I,
 )
 
-_pane_watch = {}  # pid -> {"body": str, "changed_at": float}
+_pane_watch = {}  # pid -> {"body": str, "changed_at": float, "pushed": bool}
+
+
+def _prompt_line(body, match):
+    needle = match.group(0).lower()
+    return next((l.strip() for l in body.splitlines() if needle in l.lower()), match.group(0))
 
 
 def _blocked_tick():
+    """Track each running pane; also the phone-alert trigger. Every distinct
+    pane state gets at most one push: a recognised prompt after
+    PROMPT_PUSH_THRESHOLD, anything else idle after IDLE_THRESHOLD. Replies
+    sent through the chat are announced by notify_needs_response() the moment
+    they finish, which marks the state pushed so it isn't repeated here."""
     now = datetime.now().timestamp()
     seen = set()
+    due = []  # (pid, name, detail) — pushed outside the lock
     for meta in all_projects():
         pid = meta["id"]
         if not session_running(pid):
@@ -854,13 +1027,27 @@ def _blocked_tick():
         with _lock:
             prev = _pane_watch.get(pid)
             if prev is None or prev["body"] != body:
-                _pane_watch[pid] = {"body": body, "changed_at": now}
-            # else: unchanged — leave changed_at as-is, it keeps aging
+                _pane_watch[pid] = {"body": body, "changed_at": now, "pushed": False}
+                continue
+            # unchanged — leave changed_at as-is, it keeps aging
+            if prev.get("pushed"):
+                continue
+            idle_for = now - prev["changed_at"]
+            prompt = BLOCKED_PROMPT_RE.search(body)
+            if prompt and idle_for >= PROMPT_PUSH_THRESHOLD:
+                prev["pushed"] = True
+                due.append((pid, meta.get("name", pid), _prompt_line(body, prompt)))
+            elif idle_for >= IDLE_THRESHOLD:
+                prev["pushed"] = True
+                due.append((pid, meta.get("name", pid), "idle, waiting for your next instruction"))
 
     with _lock:
         for pid in list(_pane_watch):
             if pid not in seen:
                 del _pane_watch[pid]  # session no longer running — clear stale state
+
+    for pid, name, detail in due:
+        notify_phone(name, detail, pid)
 
 
 def blocked_status(pid):
@@ -874,8 +1061,7 @@ def blocked_status(pid):
         return None, None
     m = BLOCKED_PROMPT_RE.search(watch["body"])
     if m:
-        line = next((l.strip() for l in watch["body"].splitlines() if m.group(0).lower() in l.lower()), m.group(0))
-        return "blocked", f"Waiting on a prompt: {line[:120]}"
+        return "blocked", f"Waiting on a prompt: {_prompt_line(watch['body'], m)[:120]}"
     return "blocked", "Idle — may be waiting for input"
 
 
@@ -2074,7 +2260,7 @@ def build_report_html(projects, day=None):
     </div>
   </header>
   {body}
-  <footer>Generated by Claude Manager at {day.strftime('%-I:%M %p')} — summaries are each session's own handoff notes.</footer>
+  <footer>Generated by Agent Capital at {day.strftime('%-I:%M %p')} — summaries are each session's own handoff notes.</footer>
 </body></html>"""
 
 
@@ -2614,7 +2800,7 @@ def send_message(pid):
     def _watch():
         threading.Event().wait(2)
         reply = wait_for_stable_reply(pid, text)
-        notify_macos(name, reply)
+        notify_needs_response(pid, name, reply)
         m = load_meta(pid)
         if m:
             m["last_activity"] = datetime.now().isoformat()
@@ -3057,7 +3243,7 @@ def health():
 
 
 LOGIN_PAGE = """<!doctype html>
-<html><head><title>Claude Manager — Login</title>
+<html><head><title>Agent Capital — Login</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body {{ background:#0d0d0d; color:#e8e8e8; font-family:-apple-system,BlinkMacSystemFont,sans-serif;
@@ -3072,12 +3258,79 @@ LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
   <form method="POST" action="/login">
-    <h1>Claude Manager</h1>
+    <h1>Agent Capital</h1>
     {error}
     <input type="password" name="password" placeholder="Password" autofocus>
     <button type="submit">Log in</button>
   </form>
 </body></html>"""
+
+
+# ── Phone notification routes ─────────────────────────────────────────────────
+
+@app.route("/api/push/state")
+def push_state():
+    subs = _load_push_subs()
+    return jsonify({
+        "available": PUSH_AVAILABLE,
+        "public_key": push_public_key(),
+        "name": push_greeting_name(),
+        "devices": [{"endpoint": s.get("endpoint"), "label": s.get("label", ""), "added": s.get("added")} for s in subs],
+    })
+
+
+@app.route("/api/push/subscribe", methods=["POST"])
+def push_subscribe():
+    if not PUSH_AVAILABLE:
+        return jsonify({"error": "pywebpush is not installed on the server (pip install -r backend/requirements.txt)"}), 503
+    data = request.get_json(silent=True) or {}
+    sub = data.get("subscription") or {}
+    keys = sub.get("keys") or {}
+    if not sub.get("endpoint") or not keys.get("p256dh") or not keys.get("auth"):
+        return jsonify({"error": "Invalid subscription"}), 400
+    if "name" in data:
+        save_push_settings({**load_push_settings(), "name": (data.get("name") or "").strip()})
+    with _push_lock:
+        subs = [s for s in _load_push_subs() if s.get("endpoint") != sub["endpoint"]]
+        subs.append({
+            "endpoint": sub["endpoint"],
+            "keys": {"p256dh": keys["p256dh"], "auth": keys["auth"]},
+            "label": (data.get("label") or "")[:80],
+            "added": datetime.now().isoformat(timespec="seconds"),
+        })
+        _save_push_subs(subs)
+    return jsonify({"ok": True, "devices": len(subs), "name": push_greeting_name()})
+
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+def push_unsubscribe():
+    data = request.get_json(silent=True) or {}
+    endpoint = data.get("endpoint")
+    with _push_lock:
+        subs = [s for s in _load_push_subs() if s.get("endpoint") != endpoint]
+        _save_push_subs(subs)
+    return jsonify({"ok": True, "devices": len(subs)})
+
+
+@app.route("/api/push/settings", methods=["POST"])
+def push_settings():
+    data = request.get_json(silent=True) or {}
+    save_push_settings({**load_push_settings(), "name": (data.get("name") or "").strip()})
+    return jsonify({"ok": True, "name": push_greeting_name()})
+
+
+@app.route("/api/push/test", methods=["POST"])
+def push_test():
+    """Synchronous so the modal can show why a delivery failed."""
+    if not PUSH_AVAILABLE:
+        return jsonify({"error": "pywebpush is not installed on the server"}), 503
+    data = request.get_json(silent=True) or {}
+    payload = push_payload("A test project", "this is what an alert looks like. Tap to open the dashboard.")
+    payload["url"] = "/running"
+    sent, errors = _push_send(payload, only_endpoint=data.get("endpoint"))
+    if sent == 0:
+        return jsonify({"error": errors[0] if errors else "No device is subscribed"}), 400
+    return jsonify({"ok": True, "sent": sent, "errors": errors})
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -3243,5 +3496,5 @@ if __name__ == "__main__":
     _port = int(os.environ.get("PORT", "8888"))
     _cert, _key = os.environ.get("SSL_CERT"), os.environ.get("SSL_KEY")
     _ssl = (_cert, _key) if _cert and _key and os.path.isfile(_cert) and os.path.isfile(_key) else None
-    print(f"Claude Manager backend running on {'https' if _ssl else 'http'}://{_host}:{_port}", flush=True)
+    print(f"Agent Capital backend running on {'https' if _ssl else 'http'}://{_host}:{_port}", flush=True)
     app.run(host=_host, port=_port, debug=False, threaded=True, ssl_context=_ssl)

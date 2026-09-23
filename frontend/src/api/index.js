@@ -75,6 +75,29 @@ export const api = {
   listFiles: (id, path = "") =>
     fetch(`${BASE}/projects/${id}/fs-list?path=${encodeURIComponent(path)}`).then(r => r.json()),
 
+  // Phone notifications (Web Push)
+  getPushState: () => fetch(`${BASE}/push/state`).then(r => r.json()),
+  subscribePush: (data) => fetch(`${BASE}/push/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  }).then(r => r.json()),
+  unsubscribePush: (endpoint) => fetch(`${BASE}/push/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  }).then(r => r.json()),
+  savePushSettings: (data) => fetch(`${BASE}/push/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  }).then(r => r.json()),
+  testPush: (endpoint) => fetch(`${BASE}/push/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  }).then(r => r.json()),
+
   // Import
   getImportCandidates: () => fetch(`${BASE}/import/candidates`).then(r => r.json()),
   importProjects: (projects) => fetch(`${BASE}/import`, {

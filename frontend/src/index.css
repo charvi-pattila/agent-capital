@@ -580,7 +580,7 @@ button { font-family: inherit; cursor: pointer; }
   }
   .nav-item .icon { width: 22px; height: 22px; }
   .nav-badge { position: absolute; top: 4px; left: calc(50% + 6px); margin: 0; }
-  .sidebar-footer { flex: 1; margin: 0; padding: 0; border: none; display: flex; }
+  .sidebar-footer { flex: 2; margin: 0; padding: 0; border: none; display: flex; flex-direction: row; gap: 0; }
   .sidebar-footer .btn {
     flex: 1;
     flex-direction: column;

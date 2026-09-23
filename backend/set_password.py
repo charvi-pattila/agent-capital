@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Set or change the Claude Manager login password.
+"""Set or change the Agent Capital login password.
 
 Run this once (`python backend/set_password.py`) to turn on the login gate —
 server.py checks for data/.auth_hash on every request and skips the gate

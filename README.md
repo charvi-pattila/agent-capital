@@ -1,4 +1,4 @@
-# Claude Manager
+# Agent Capital
 
 A dashboard for running and managing multiple [Claude Code](https://claude.com/claude-code) sessions in parallel, instead of juggling terminal tabs. Each project gets its own tmux-backed Claude Code session, mirrored live in the browser, with tooling wrapped around it: memory injection, automated code review, task splitting across parallel agents, and end-of-day reporting.
 
@@ -12,6 +12,7 @@ Built solo, iteratively, almost entirely by describing features to Claude Code i
 - **Split runs (parallel mini-agents)** — for a task too big to do sequentially, a planning pass reads the repo and proposes independent pieces. Each approved piece becomes its own `git worktree` + branch + full Claude Code session, all running concurrently with their own terminal and input box, so any one agent can be corrected mid-flight without touching the others. "Merge all" folds the branches back in one at a time, stopping at the first conflict.
 - **Daily report** — closing all sessions at once triggers a per-project handoff summary, rendered to PDF and (optionally) emailed.
 - **Context-bloat monitor** — watches each session's live context size (from Claude Code's own transcript) and, once it's bloated or the session has run for hours, has the agent write a handoff checkpoint into project memory and then `/compact` with instructions about what to keep. Manual "Trim" button in the project header.
+- **Phone alerts (Web Push)** — "Hey Charvi, Agent Capital: *project* needs your response" lands on the phone whenever a session finishes a reply or sits on a y/n or menu prompt. See [Phone notifications](#phone-notifications).
 - **Blocked-session watchdog, screenshot-diff test runner, native Terminal.app windows, mobile-responsive layout.**
 
 ## Stack
@@ -66,6 +67,18 @@ launchctl kickstart -k gui/$(id -u)/com.agent-capital.server   # restart (e.g. a
 launchctl print gui/$(id -u)/com.agent-capital.server          # status / pid
 scripts/uninstall-service.sh                                   # stop + remove (logs are kept)
 ```
+
+## Phone notifications
+
+Alerts go over Web Push, so they arrive even when the server is a headless box and the app is closed. The backend generates a VAPID key pair on first use (`data/push/vapid_private.pem` — back it up with `data/`; a new key invalidates every subscription) and keeps subscriptions in `data/push/subscriptions.json`.
+
+Turning it on, per device:
+
+1. Open the app over its `https://` Tailscale URL. On an iPhone it **must** be the installed app: Share → Add to Home Screen, then open it from there (Safari tabs can't receive push).
+2. Tap **Alerts** (bottom bar on the phone, sidebar on desktop), type your name for the greeting, tap **Turn on** and allow notifications.
+3. **Send test** should show a notification within a few seconds. Tapping any alert opens that project.
+
+What triggers one: a chat reply finishing, a recognised CLI prompt (`(y/n)`, numbered menu, "press enter") sitting unanswered for ~20–30 s, or any session idle for 90 s. Each distinct terminal state alerts at most once, so a session left waiting doesn't nag. `NOTIFY_NAME=…` in `backend/.env` is a fallback for the greeting name; `PUSH_CONTACT=mailto:…` sets the VAPID contact address.
 
 ## Run on a Windows PC as an always-on server (WSL2 + systemd)
 
