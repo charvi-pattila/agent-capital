@@ -2,3 +2,4 @@ flask
 flask-cors
 Pillow
 pywebpush   # phone notifications (Web Push); see README
+flask-sock   # raw terminal websocket (xterm.js)

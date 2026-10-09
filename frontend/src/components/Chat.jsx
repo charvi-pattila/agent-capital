@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import { api, streamCouncil } from "../api";
 import Icon from "./Icon";
 
@@ -54,185 +57,54 @@ function parseSelectPrompt(content, cursor) {
   return { options, cursorPos };
 }
 
-// tmux always captures a full pane-height's worth of lines (the session is
-// created tall on purpose, see spawn_claude_tmux, so a good chunk of
-// scrollback fits in one capture) — once the actual output is short, most of
-// that is blank padding below the last real line, which otherwise renders as
-// a big dead gap between the visible content and the input box below it.
-// Trim it, but never past the cursor's own row (kept even if that row looks
-// blank, e.g. an empty prompt with nothing typed yet).
-//
-// A prior version of this also cut everything before the last long run of
-// blank lines, to handle Ink leaving a stale boot-banner frame sitting way
-// above a freshly-opened menu (rows 7-185 blank, banner at 1-6, menu at
-// 186-199). That was wrong in general: verified live against a real, ongoing
-// conversation (not a fresh boot) where Claude's actual last reply — the
-// question the user still needed to answer — sat at rows 1-40, followed by
-// ~156 *legitimately blank* rows before the input line (completely normal:
-// the pane is deliberately tall, and Ink just doesn't fill it). The old logic
-// treated that as "stale" and deleted the real conversation from view. Only
-// trailing blank (after the last real line, never seen, never scrolled to)
-// is safe to cut — never lines before it, no matter how much blank space
-// follows them.
-function trimDeadSpace(content, cursor) {
-  const lines = content.split("\n");
-  const minKeep = cursor && cursor.y >= 0 ? cursor.y : 0;
-  let last = lines.length - 1;
-  while (last > minKeep && lines[last].trim() === "") last--;
-  return { text: lines.slice(0, last + 1).join("\n"), cursor };
-}
-
-// The trailing trim above doesn't touch blank space *between* two real
-// blocks — verified live: a normal reply ending "Tell me which registrar..."
-// sat right above ~137 genuinely blank rows before the next input line, all
-// of it legitimate (Ink just doesn't fill the deliberately-tall pane), none
-// of it safe to delete outright (that's exactly the mistake reverted above).
-// But it's still a wall of dead space between two things the user actually
-// needs to read together. Difference from the reverted approach: this never
-// removes a non-blank line, ever — it only shortens a blank *run* down to a
-// small fixed size, so nothing that was ever real text can be lost, only
-// excess padding. `indexMap` remaps each original row to its new position so
-// the cursor (and hence the auto-scroll target) still lands correctly.
-const MAX_BLANK_RUN = 3;
-function collapseBlankRuns(content, cursor) {
-  const lines = content.split("\n");
-  const outLines = [];
-  const indexMap = new Array(lines.length);
-  let blankRun = 0;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim() === "") {
-      blankRun++;
-      if (blankRun <= MAX_BLANK_RUN) {
-        indexMap[i] = outLines.length;
-        outLines.push(lines[i]);
-      } else {
-        indexMap[i] = outLines.length - 1; // folds into the last kept blank line
-      }
-    } else {
-      blankRun = 0;
-      indexMap[i] = outLines.length;
-      outLines.push(lines[i]);
-    }
-  }
-  const newCursor = cursor && cursor.y >= 0 && cursor.y < indexMap.length
-    ? { ...cursor, y: indexMap[cursor.y] }
-    : cursor;
-  return { text: outLines.join("\n"), cursor: newCursor };
-}
-
-// Renders one line of the terminal mirror, splicing in a blinking caret span
-// when this is the line tmux's cursor actually sits on and reports it visible
-// — otherwise x/y can be stale (e.g. wherever it last sat before a selection
-// menu hid it) and a fake blinking caret on old, unrelated text would be
-// actively misleading. A blank line still needs *something* rendered or the
-// div collapses to zero height (breaking the line-based scroll math below).
-function renderLine(line, isCursorLine, cursor) {
-  if (!isCursorLine || !cursor || !cursor.visible) return line || " ";
-  const before = line.slice(0, cursor.x);
-  const at = line[cursor.x] ?? " ";
-  const after = line.slice(cursor.x + 1);
-  return (
-    <>
-      {before}
-      <span className="term-cursor">{at}</span>
-      {after}
-    </>
-  );
-}
+// Raw bytes a terminal sends for the keys we forward by name.
+const KEY_BYTES = {
+  Enter: "\r", BSpace: "\x7f", Tab: "\t", BTab: "\x1b[Z", Escape: "\x1b", Space: " ",
+  Up: "\x1b[A", Down: "\x1b[B", Right: "\x1b[C", Left: "\x1b[D",
+  PageUp: "\x1b[5~", PageDown: "\x1b[6~",
+};
+const enc = new TextEncoder();
 
 export default function Chat({ projectId, status }) {
-  const [content, setContent] = useState("");
-  const [cursor, setCursor] = useState(null); // { x, y, visible } — tmux's real cursor cell
-  // Always the newest frame, even while the view is paused for reading (in
-  // which case `content`/`cursor` above deliberately stop updating). Anything
-  // that *acts* on the terminal — the select-prompt chips, digit shortcuts —
-  // must key off this, never the frozen display copy: keys are computed as
-  // Up/Down deltas from the highlighted row, and a delta taken against a
-  // stale frame walks the real cursor to the wrong option.
+  // Newest text snapshot of the pane (slow SSE feed). The xterm view draws the
+  // screen itself; this only exists so the select-prompt chips and digit
+  // shortcuts can parse the current menu.
   const [live, setLive] = useState({ content: "", cursor: null });
   const [offline, setOffline] = useState(true);
   const [sending, setSending] = useState(false);
   const [images, setImages] = useState([]); // [{ file, previewUrl }]
+  const [attachError, setAttachError] = useState("");
   const [dragOver, setDragOver] = useState(false);
-  // "Pinned" = following live output. Scrolling up pauses the feed entirely
-  // (frozen text is readable/selectable while Claude streams); the latest
-  // content keeps buffering in latestRef and is applied on resume.
-  const [pinned, setPinned] = useState(true);
   const [councilState, setCouncilState] = useState("idle");
-  const termRef = useRef(null);
-  const targetLineRef = useRef(null); // the DOM node for the line auto-scroll should land on
-  const esRef = useRef(null);
-  const pinnedRef = useRef(true);
-  const latestRef = useRef("");
+  const hostRef = useRef(null);   // xterm mounts here
+  const xtermRef = useRef(null);
+  const wsRef = useRef(null);
   const latestCursorRef = useRef(null);
-  const touchingRef = useRef(false);
-  const scrollCooldownRef = useRef(false);
   const inputRef = useRef(null);
-  // Forwarded keystrokes/pastes must land in the order they were typed —
-  // fetches can resolve out of order over the network, so chain them.
+  // Non-keystroke actions (chips, image upload) go over HTTP and must land in
+  // order — fetches can resolve out of order, so chain them.
   const chainRef = useRef(Promise.resolve());
   const enqueue = (fn) => {
     chainRef.current = chainRef.current.then(fn).catch(() => {});
   };
 
-  // Printable characters typed in quick succession (fast typing, key repeat,
-  // IME) are coalesced into one /type call instead of one round trip per
-  // character — each round trip is small on its own, but firing one per
-  // keystroke let fast typing outrun the network and visibly queue up.
-  const pendingTextRef = useRef("");
-  const flushTimerRef = useRef(null);
-  const flushPendingText = () => {
-    if (flushTimerRef.current) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-    if (pendingTextRef.current) {
-      const text = pendingTextRef.current;
-      pendingTextRef.current = "";
-      enqueue(() => api.typeText(projectId, text));
-    }
+  // Keystrokes ride the terminal websocket as raw bytes (no per-key HTTP round
+  // trip); if it isn't open yet they fall back to the HTTP endpoints.
+  const sendRaw = (str) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === 1) { ws.send(enc.encode(str)); return true; }
+    return false;
   };
-  const queueChar = (ch) => {
-    pendingTextRef.current += ch;
-    if (!flushTimerRef.current) {
-      flushTimerRef.current = setTimeout(() => {
-        flushTimerRef.current = null;
-        flushPendingText();
-      }, 12);
-    }
+  const sendNamed = (name) => {
+    if (!sendRaw(KEY_BYTES[name])) enqueue(() => api.sendKeys(projectId, [name]));
   };
-  useEffect(() => () => flushPendingText(), [projectId]);
+  const typeText = (text) => {
+    if (!sendRaw(text)) enqueue(() => api.typeText(projectId, text));
+  };
 
   const selectPrompt = !offline ? parseSelectPrompt(live.content, live.cursor) : null;
-  // parseSelectPrompt above (and everything that forwards keystrokes) works
-  // off the raw, untrimmed *live* content/cursor — trimming only affects
-  // what's rendered, so row indices used to detect the current menu stay
-  // valid, and a paused-for-reading view can't feed it a stale menu.
-  const trimmed = !offline ? trimDeadSpace(content, cursor) : { text: content, cursor };
-  const { text: displayText, cursor: displayCursor } = !offline
-    ? collapseBlankRuns(trimmed.text, trimmed.cursor)
-    : trimmed;
-  const displayLines = displayText.split("\n");
-  // Where auto-scroll should land: the last *rendered* line. Trailing blank
-  // padding is already trimmed and long blank runs collapsed above, so this
-  // is the actually-current line, not the raw bottom of the (deliberately
-  // huge, mostly-blank) tmux pane.
-  //
-  // This used to target the CLI's cursor row instead, which broke every
-  // interactive select prompt: while a menu is open, Ink hides the cursor and
-  // parks it on the highlighted option — the *middle* of the menu — so
-  // aligning that row to the container's bottom edge scrolled the remaining
-  // options out of view, and (worse) left enough content below the fold that
-  // handleScroll's at-bottom check failed on the programmatic scroll and
-  // silently paused live updates. From then on the frame stayed frozen on the
-  // first question while the real terminal moved on, so chip clicks computed
-  // Up/Down deltas against a stale menu and landed on the wrong option
-  // (typically "Type something." / Esc → "User declined to answer").
-  // Verified in headless Chrome against a real AskUserQuestion dialog.
-  const targetLineIdx = displayLines.length - 1;
 
   const chooseOption = (targetIdx) => {
-    flushPendingText();
     const delta = targetIdx - selectPrompt.cursorPos;
     const step = delta > 0 ? "Down" : "Up";
     const keys = Array(Math.abs(delta)).fill(step);
@@ -283,53 +155,20 @@ export default function Chat({ projectId, status }) {
     setChecked(new Set());
   };
 
-  // Scrolls so the current line's bottom edge sits at the container's bottom
-  // edge — not `scrollTop = scrollHeight`, which lands on the literal end of
-  // the tmux pane. A normal reply can leave 100+ blank rows before the next
-  // prompt (the pane is deliberately tall; Ink just doesn't fill it), so that
-  // showed a viewport almost entirely full of blank space instead of the
-  // line the user's actually looking at. Uses viewport-relative rects (not
-  // offsetTop) so it doesn't depend on which ancestor ends up as offsetParent.
-  const scrollToTarget = () => {
-    const body = termRef.current;
-    const target = targetLineRef.current;
-    if (!body) return;
-    if (!target) { body.scrollTop = body.scrollHeight; return; }
-    const delta = target.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom;
-    body.scrollTop = Math.max(0, body.scrollTop + delta);
-  };
-
-  const pauseLive = () => { pinnedRef.current = false; setPinned(false); };
-  const resumeLive = () => {
-    pinnedRef.current = true;
-    setPinned(true);
-    setContent(latestRef.current);
-    setCursor(latestCursorRef.current);
-    requestAnimationFrame(scrollToTarget);
-  };
-
   useEffect(() => {
     let es;
     let reconnectTimer;
     let cancelled = false;
 
     const connect = () => {
-      es = new EventSource(`/api/projects/${projectId}/terminal`);
-      esRef.current = es;
+      es = new EventSource(`/api/projects/${projectId}/terminal?slow=1`);
 
       es.onmessage = (e) => {
         const data = JSON.parse(e.data);
         setOffline(!!data.offline);
+        if (data.cursor) latestCursorRef.current = data.cursor;
         if (data.content !== undefined) {
-          latestRef.current = data.content;
-          if (pinnedRef.current) setContent(data.content);
-        }
-        if (data.cursor) {
-          latestCursorRef.current = data.cursor;
-          if (pinnedRef.current) setCursor(data.cursor);
-        }
-        if (data.content !== undefined) {
-          setLive({ content: latestRef.current, cursor: latestCursorRef.current });
+          setLive({ content: data.content, cursor: latestCursorRef.current });
         }
       };
 
@@ -358,43 +197,114 @@ export default function Chat({ projectId, status }) {
     return stop;
   }, [projectId]);
 
-  // Keep the view glued to the current line while following (runs after
-  // render, so the target line's rect reflects the new content).
+  // The terminal itself: xterm.js drawing the bytes of a pty attached to the
+  // tmux session. While connected the server sizes the tmux window to this
+  // element (cols x rows), so Claude's TUI lays out like in any real terminal.
   useEffect(() => {
-    if (!offline && pinnedRef.current) scrollToTarget();
-  }, [content, cursor, offline]);
+    if (offline) return;
+    const css = getComputedStyle(document.documentElement);
+    const term = new Terminal({
+      fontFamily: '"Monaco", "Menlo", "Courier New", monospace',
+      fontSize: 13,
+      scrollback: 0, // Claude's TUI owns scrolling (PageUp/PageDown, below)
+      cursorInactiveStyle: "block", // typing happens in the input row, not xterm
+      theme: {
+        background: css.getPropertyValue("--term").trim() || "#000",
+        foreground: css.getPropertyValue("--term-text").trim() || "#ddd",
+      },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(hostRef.current);
+    xtermRef.current = term;
+
+    let ws;
+    let reconnectTimer;
+    let cancelled = false;
+    const sendSize = () => {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    };
+    const connect = () => {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/api/projects/${projectId}/pty`);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+      ws.onopen = () => { fit.fit(); sendSize(); };
+      ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+      ws.onclose = () => {
+        if (!cancelled && !document.hidden) reconnectTimer = setTimeout(connect, 2000);
+      };
+    };
+    connect();
+    // A hidden/backgrounded page (phone app switch, bfcache) must let go of the
+    // terminal: while attached, the tmux window keeps this page's size.
+    const onHidden = () => {
+      if (document.hidden) {
+        clearTimeout(reconnectTimer);
+        if (ws) ws.close();
+      } else if (!ws || ws.readyState > 1) {
+        connect();
+      }
+    };
+    document.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("pagehide", onHidden);
+
+    // Paste (term.paste) and anything xterm itself captures go out as input too.
+    const dataSub = term.onData(d => sendRaw(d));
+    const sizeSub = term.onResize(sendSize);
+    const ro = new ResizeObserver(() => fit.fit());
+    ro.observe(hostRef.current);
+
+    // Claude's TUI runs in the alternate screen (no scrollback), so wheel and
+    // swipe become PageUp/PageDown, the same as the old text mirror did.
+    let wheelAcc = 0;
+    term.attachCustomWheelEventHandler((ev) => {
+      wheelAcc += ev.deltaY;
+      while (Math.abs(wheelAcc) >= 80) {
+        sendRaw(KEY_BYTES[wheelAcc < 0 ? "PageUp" : "PageDown"]);
+        wheelAcc -= Math.sign(wheelAcc) * 80;
+      }
+      return false;
+    });
+    let touchY = null;
+    const el = hostRef.current;
+    const onTouchStart = (e) => { touchY = e.touches[0].clientY; };
+    const onTouchMove = (e) => {
+      if (touchY === null) return;
+      e.preventDefault();
+      const dy = e.touches[0].clientY - touchY;
+      if (Math.abs(dy) >= 48) {
+        sendRaw(KEY_BYTES[dy > 0 ? "PageUp" : "PageDown"]);
+        touchY = e.touches[0].clientY;
+      }
+    };
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(reconnectTimer);
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pagehide", onHidden);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      ro.disconnect();
+      dataSub.dispose();
+      sizeSub.dispose();
+      if (ws) ws.close();
+      wsRef.current = null;
+      xtermRef.current = null;
+      term.dispose();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, offline]);
 
   // Revoke object URLs on unmount (ref avoids the stale initial-array closure)
   const imagesRef = useRef(images);
   imagesRef.current = images;
   useEffect(() => () => imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl)), []);
-
-  const handleScroll = () => {
-    if (!termRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = termRef.current;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 60;
-    if (atBottom && !pinnedRef.current) resumeLive();
-    else if (!atBottom && pinnedRef.current) pauseLive();
-  };
-
-  // The pane is now sized tall enough that Claude Code's TUI renders a good
-  // chunk of scrollback into one capture, so normal native DOM scrolling
-  // handles most of it (real scrollbar, smooth motion). Only once the user
-  // hits the very top and keeps trying to go further do we ask the CLI's own
-  // TUI to page back further (it has no true scrollback of its own — it's
-  // running in tmux's alternate screen buffer — so this is the only way to
-  // reveal older history; it says as much in its own UI: "scroll with PgUp/PgDn").
-  const handleWheel = (e) => {
-    if (offline || !termRef.current) return;
-    const atTop = termRef.current.scrollTop <= 0;
-    if (!(atTop && e.deltaY < 0)) return; // let native scroll handle everything else
-    e.preventDefault();
-    if (scrollCooldownRef.current) return;
-    scrollCooldownRef.current = true;
-    api.scrollTerminal(projectId, "up", 3).finally(() => {
-      setTimeout(() => { scrollCooldownRef.current = false; }, 350);
-    });
-  };
 
   const addImageFiles = (files) => {
     const imgs = [...files].filter(f => f.type.startsWith("image/"));
@@ -420,8 +330,7 @@ export default function Chat({ projectId, status }) {
     const text = e.clipboardData?.getData("text/plain");
     if (text) {
       e.preventDefault();
-      flushPendingText();
-      enqueue(() => api.typeText(projectId, text));
+      xtermRef.current?.paste(text); // bracketed when Claude asked for it
     }
   };
 
@@ -446,19 +355,30 @@ export default function Chat({ projectId, status }) {
   // Split) send messages through.
   const submitWithImages = async () => {
     setSending(true);
+    setAttachError("");
     try {
       const paths = [];
       for (const img of images) {
         const res = await api.uploadFile(projectId, img.file);
-        if (res.path) paths.push(res.path);
+        if (!res.path) throw new Error(res.error || "upload failed");
+        paths.push(res.path);
       }
       const lines = paths.map(p => `[Image attached: ${p}]`).join("\n");
-      if (lines) await api.sendMessage(projectId, lines);
-      else await api.sendKeys(projectId, ["Enter"]);
+      await api.sendMessage(projectId, lines);
       images.forEach(img => URL.revokeObjectURL(img.previewUrl));
       setImages([]);
-    } catch (_) {}
+    } catch (e) {
+      // Keep the attachments so nothing is lost and Enter can retry.
+      setAttachError(`Couldn't send image — ${e.message || "upload failed"}. Tap Enter to retry.`);
+    }
     setSending(false);
+  };
+
+  // Enter from either the keyboard or the phone key strip: with images
+  // attached it has to go through the upload-then-paste step, not a bare key.
+  const submitEnter = () => {
+    if (images.length > 0) enqueue(submitWithImages);
+    else sendNamed("Enter");
   };
 
   const ARROW_KEY = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
@@ -495,40 +415,32 @@ export default function Chat({ projectId, status }) {
 
     if (e.key === "Enter") {
       e.preventDefault();
-      flushPendingText();
-      // Chained after the flush above (not fired independently) so the image
-      // upload can't race ahead of and land before text just typed live.
-      if (images.length > 0) enqueue(submitWithImages);
-      else enqueue(() => api.sendKeys(projectId, ["Enter"]));
+      submitEnter();
       return;
     }
     if (e.key === "Backspace") {
       e.preventDefault();
-      flushPendingText();
-      enqueue(() => api.sendKeys(projectId, ["BSpace"]));
+      sendNamed("BSpace");
       return;
     }
     if (e.key === "Tab") {
       e.preventDefault();
-      flushPendingText();
-      enqueue(() => api.sendKeys(projectId, [e.shiftKey ? "BTab" : "Tab"]));
+      sendNamed(e.shiftKey ? "BTab" : "Tab");
       return;
     }
     if (e.key === "Escape") {
       e.preventDefault();
-      flushPendingText();
-      enqueue(() => api.sendKeys(projectId, ["Escape"]));
+      sendNamed("Escape");
       return;
     }
     if (ARROW_KEY[e.key]) {
       e.preventDefault();
-      flushPendingText();
-      enqueue(() => api.sendKeys(projectId, [ARROW_KEY[e.key]]));
+      sendNamed(ARROW_KEY[e.key]);
       return;
     }
     if (e.key.length === 1) {
       e.preventDefault();
-      queueChar(e.key);
+      typeText(e.key);
     }
   };
 
@@ -536,8 +448,8 @@ export default function Chat({ projectId, status }) {
   // hides. pointerdown is cancelled so tapping one doesn't blur the input and
   // dismiss the keyboard mid-conversation.
   const sendKey = (key) => {
-    flushPendingText();
-    enqueue(() => api.sendKeys(projectId, [key]));
+    if (key === "Enter") return submitEnter();
+    sendNamed(key);
   };
   const keepFocus = (e) => e.preventDefault();
 
@@ -560,32 +472,15 @@ export default function Chat({ projectId, status }) {
         </span>
       </div>
 
-      <div
-        className="terminal-body"
-        ref={termRef}
-        onScroll={handleScroll}
-        onWheel={handleWheel}
-        onTouchStart={() => { touchingRef.current = true; }}
-        onTouchEnd={() => { touchingRef.current = false; handleScroll(); }}
-        onClick={() => inputRef.current?.focus()}
-      >
-        <div className="terminal-body-inner">
-          {offline ? (
-            <div className="terminal-offline">
-              {status === "running"
-                ? "Connecting to session..."
-                : "Session is stopped. Press Start to launch Claude."}
-            </div>
-          ) : (
-            <pre className="terminal-output">
-              {displayLines.map((line, i) => (
-                <div key={i} ref={i === targetLineIdx ? targetLineRef : null}>
-                  {renderLine(line, !!displayCursor && i === displayCursor.y, displayCursor)}
-                </div>
-              ))}
-            </pre>
-          )}
-        </div>
+      <div className="terminal-body xterm-body" onClick={() => inputRef.current?.focus()}>
+        {offline && (
+          <div className="terminal-offline">
+            {status === "running"
+              ? "Connecting to session..."
+              : "Session is stopped. Press Start to launch Claude."}
+          </div>
+        )}
+        {!offline && <div className="terminal-host" ref={hostRef} />}
       </div>
 
       {selectPrompt && !multiMode && (
@@ -643,7 +538,9 @@ export default function Chat({ projectId, status }) {
               >×</button>
             </div>
           ))}
-          <span className="attach-hint">{images.length} image{images.length > 1 ? "s" : ""} attached</span>
+          <span className="attach-hint">
+            {attachError || `${images.length} image${images.length > 1 ? "s" : ""} attached`}
+          </span>
         </div>
       )}
 
