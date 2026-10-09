@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import server
+import core
+import reports
 
 TMP = Path(tempfile.mkdtemp(prefix="reporttest-"))
 FAILED = False
@@ -23,17 +24,23 @@ def check(label, cond, extra=""):
 
 
 # ── isolated data store ──
-server.DATA_DIR = TMP / "projects"
-server.DATA_DIR.mkdir(parents=True)
-server.REPORTS_DIR = TMP / "reports"
-server.EMAIL_CONFIG_PATH = TMP / ".email_config"
+# server.py was split into modules; each one holds its own copy of these
+# paths (imported by value), so the override has to hit every module that has one.
+_PATHS = {"DATA_DIR": TMP / "projects", "REPORTS_DIR": TMP / "reports",
+          "EMAIL_CONFIG_PATH": TMP / ".email_config"}
+for _m in list(sys.modules.values()):
+    if getattr(_m, "__file__", "") and Path(_m.__file__).parent == Path(__file__).parent:
+        for _k, _v in _PATHS.items():
+            if hasattr(_m, _k):
+                setattr(_m, _k, _v)
+core.DATA_DIR.mkdir(parents=True)
 
 now = datetime.now()
 
 
 def make_project(pid, name, emoji, summary, *, msgs=0, errors="", when=None,
                  limit_paused=False, council=None, split=None, stale=False):
-    d = server.DATA_DIR / pid
+    d = core.DATA_DIR / pid
     (d / "memory" / "components").mkdir(parents=True)
     (d / "memory" / "last_session.md").write_text(summary)
     (d / "memory" / "errors.md").write_text(errors)
@@ -84,11 +91,11 @@ make_project(
 make_project("ddd4", "buget-planner", "💰", "An old summary from last week.", msgs=4, stale=True)
 
 print("1. activity detection")
-active = [server.collect_day_activity(p) for p in ("aaa1", "bbb2", "ccc3", "ddd4")]
+active = [reports.collect_day_activity(p) for p in ("aaa1", "bbb2", "ccc3", "ddd4")]
 check("today's projects detected", all(a is not None for a in active[:3]))
 check("a project idle since last week is excluded", active[3] is None)
 check("a just-written file with old timestamps is still excluded (no mtime heuristic)",
-      (server.DATA_DIR / "ddd4" / "memory" / "last_session.md").stat().st_mtime > (now - timedelta(minutes=5)).timestamp()
+      (core.DATA_DIR / "ddd4" / "memory" / "last_session.md").stat().st_mtime > (now - timedelta(minutes=5)).timestamp()
       and active[3] is None)
 check("message counts are today-only", [a["messages"] for a in active[:3]] == [14, 6, 3],
       str([a["messages"] for a in active[:3]]))
@@ -99,7 +106,7 @@ check("limit pause flagged", active[2]["limit_paused"])
 check("errors carried through", "render-blocking" in active[1]["errors"])
 
 print("\n2. html render")
-html = server.build_report_html([a for a in active if a])
+html = reports.build_report_html([a for a in active if a])
 check("every active project appears", all(n in html for n in ("lucky-planner", "Personal Website", "Resume Rebuilder")))
 check("the stale project doesn't", "buget-planner" not in html)
 check("totals are right", "<b>3</b> project" in html and "<b>23</b> message" in html)
@@ -108,17 +115,17 @@ check("html is escaped", "&amp;" in html or "<script" not in html)
 
 print("\n3. pdf render (real Chrome)")
 pdf = TMP / "report.pdf"
-ok = server.render_pdf(html, pdf)
+ok = reports.render_pdf(html, pdf)
 check("chrome produced a pdf", ok and pdf.exists())
 check("pdf is non-trivial", pdf.stat().st_size > 8000, f"{pdf.stat().st_size} bytes")
 check("file really is a pdf", pdf.read_bytes()[:5] == b"%PDF-", str(pdf.read_bytes()[:5]))
 
 print("\n4. email with no config")
-sent, detail = server.send_report_email(pdf, [a for a in active if a])
+sent, detail = reports.send_report_email(pdf, [a for a in active if a])
 check("unconfigured email is reported, not raised", sent is False and "No email configured" in detail, detail)
 
 print("\n5. email with config (SMTP faked)")
-server.EMAIL_CONFIG_PATH.write_text(json.dumps({
+reports.EMAIL_CONFIG_PATH.write_text(json.dumps({
     "smtp_user": "someone@gmail.com", "smtp_pass": "app password here", "to": "someone@gmail.com"}))
 
 captured = {}
@@ -143,7 +150,7 @@ class FakeSMTP:
 
 import smtplib
 smtplib.SMTP_SSL = FakeSMTP
-sent, detail = server.send_report_email(pdf, [a for a in active if a])
+sent, detail = reports.send_report_email(pdf, [a for a in active if a])
 check("reports as sent", sent is True, detail)
 check("connects to gmail over SSL", captured.get("host") == "smtp.gmail.com" and captured["port"] == 465)
 check("logs in with the configured credentials", captured.get("login") == ("someone@gmail.com", "app password here"))
@@ -159,16 +166,16 @@ check("plain-text body lists the projects",
       all(n in msg.get_body(("plain",)).get_content() for n in ("lucky-planner", "Personal Website")))
 
 print("\n6. full pipeline")
-res = server.build_and_send_daily_report()
+res = reports.build_and_send_daily_report()
 check("pipeline reports success", res["ok"] and res["emailed"], str(res))
 check("counted the right projects", res["projects"] == 3, str(res["projects"]))
-check("pdf written to the reports dir", Path(res["pdf"]).exists() and Path(res["pdf"]).parent == server.REPORTS_DIR)
+check("pdf written to the reports dir", Path(res["pdf"]).exists() and Path(res["pdf"]).parent == reports.REPORTS_DIR)
 
 print("\n7. a day with nothing on it")
-for d in server.DATA_DIR.iterdir():
+for d in core.DATA_DIR.iterdir():
     shutil.rmtree(d)
 captured.clear()
-res = server.build_and_send_daily_report()
+res = reports.build_and_send_daily_report()
 check("succeeds without sending an empty report", res["ok"] and res["emailed"] is False, str(res))
 check("says zero projects", res["projects"] == 0)
 check("no email was actually attempted", "msg" not in captured)
