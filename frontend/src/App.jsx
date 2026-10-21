@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation, useNavigate } from 
 import Dashboard from "./pages/Dashboard";
 import Project from "./pages/Project";
 import Running from "./pages/Running";
+import Profile from "./pages/Profile";
 import CloseAllModal from "./components/CloseAllModal";
 import AlertsModal from "./components/AlertsModal";
 import Icon from "./components/Icon";
@@ -61,6 +62,9 @@ function Shell() {
             </span>
           )}
         </NavLink>
+        <NavLink to="/profile" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>
+          <Icon name="user" size={18} /> Profile
+        </NavLink>
         <div className="sidebar-footer">
           <button
             className="btn btn-ghost btn-sm btn-block"
@@ -84,6 +88,7 @@ function Shell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/project/:id" element={<Project />} />
           <Route path="/running" element={<Running />} />
+          <Route path="/profile" element={<Profile />} />
         </Routes>
       </main>
       {showCloseModal && <CloseAllModal onClose={() => setShowCloseModal(false)} />}

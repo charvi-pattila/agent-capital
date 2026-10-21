@@ -13,6 +13,12 @@ function fetch(url, opts) {
 }
 
 export const api = {
+  // Updates (Profile tab). Update calls return {ok, output} even on failure.
+  getUpdateStatus: () => fetch(`${BASE}/update/status`).then(r => r.json()),
+  updateClaude: () => fetch(`${BASE}/update/claude`, { method: "POST" }).then(r => r.json()),
+  openSelfProject: () => fetch(`${BASE}/update/self-project`, { method: "POST" }).then(r => r.json()),
+  updateApp: () => fetch(`${BASE}/update/app`, { method: "POST" }).then(r => r.json()),
+
   // Projects
   getProjects: () => fetch(`${BASE}/projects`).then(r => r.json()),
   createProject: (data) => fetch(`${BASE}/projects`, {

@@ -11,6 +11,7 @@ from routes_projects import _close_all_sessions
 
 # Importing the route modules registers their @app.route handlers.
 import routes_agents, routes_data, routes_terminal, ptyws  # noqa: F401,E401
+import routes_update  # noqa: F401
 import routes_site  # noqa: F401  (last: owns the catch-all frontend route)
 
 
