@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from flask import jsonify, request, Response, send_file
 from core import CLAUDE_BIN, PROJECTS_BASE_DIR, all_projects, app, init_project_dir, load_meta, project_dir, resolve_project_path, save_meta
-from tmuxlib import dev_server_running, kill_session, open_terminal_window, paste_into_session, session_name, session_running, start_dev_server, start_session
+from tmuxlib import dev_server_running, kill_session, open_terminal_window, paste_into_session, session_name, session_running, start_dev_server, start_session, wait_for_claude_ready
 from messaging import _do_send_message, clear_unread, load_messages, wait_for_stable_reply
 from push import notify_needs_response
 from context import _save_session_summary, _trim_state, context_status, get_running_sessions, session_idle, trim_context
@@ -165,7 +165,9 @@ def start_project(pid):
         start_dev_server(pid, meta.get("path"), meta.get("server_cmd"))
         context = build_context_prompt(pid)
         if context:
-            threading.Event().wait(3)
+            # A fixed sleep lost the prompt whenever startup ran slow (cold tmux,
+            # Claude Code self-updating): wait for the TUI to paint its input box.
+            wait_for_claude_ready(session_name(pid))
             prompt = context + "\n\nBriefly summarize where we left off and what you'll focus on first."
             _do_send_message(pid, prompt)
 

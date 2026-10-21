@@ -106,7 +106,9 @@ def paste_into_session(session, message, delay=0.3, submit=True):
     subprocess.run([TMUX, "set-buffer", "-b", buf, "--", message])
     subprocess.run([TMUX, "paste-buffer", "-d", "-b", buf, "-t", session])
     if submit:
-        threading.Event().wait(delay)
+        # Ink takes longer to absorb a long paste; an Enter that arrives before
+        # it's done is swallowed and the text sits unsent in the input box.
+        threading.Event().wait(max(delay, min(3.0, len(message) / 1500)))
         subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
 
 
@@ -162,8 +164,9 @@ def start_session(pid, project_path=None):
 def open_terminal_window(pid):
     """Pop a native Terminal.app window attached to the session (macOS only).
     On Linux the web mirror is the only UI; attach by hand with
-    `tmux attach -t <session>` if you are at the server's shell."""
-    if not IS_MACOS:
+    `tmux attach -t <session>` if you are at the server's shell.
+    AGENT_CAPITAL_TERMINAL_WINDOWS=0 turns this off on a Mac used as a server."""
+    if not IS_MACOS or os.environ.get("AGENT_CAPITAL_TERMINAL_WINDOWS") == "0":
         return
     session = session_name(pid)
     script = (
