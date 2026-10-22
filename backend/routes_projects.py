@@ -192,9 +192,6 @@ def _pause_project_and_save(pid, notify=True):
 @app.route("/api/projects/<pid>/pause", methods=["POST"])
 def pause_project(pid):
     _pause_project_and_save(pid)
-    # Pausing this one project also stops its app; Close All and backend
-    # restarts close only the Claude sessions and leave apps running.
-    stop_dev_server(pid)
     return jsonify({"status": "stopped"})
 
 
