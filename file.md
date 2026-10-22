@@ -223,7 +223,7 @@ Correction: the first `launchctl bootout` SIGKILLed the backend ~20s into the gr
 
 ## Next time
 - Restart the service if not done yet (it loads the Enter-retry fix), then press Start on a project and check that the resume prompt sends by itself.
-- Uncommitted work recovered from the PC is still uncommitted: job-auto-applier (68 files), budget-manager (9: logo + Expenses tab), personal-website (4). Commit/push when the user says so. cha-cha-wardrobe, website-maker and youtube-shorts have no git repo at all. Offer to create private repos so this can't happen again.
+- Done at end of session: the recovered work was committed and pushed (budget-manager `c70aa0a`, job-auto-applier `3d4e783`, personal-website `7f5103e`), and new **private** repos were created for cha-cha-wardrobe, website-maker, youtube-shorts and wavelength-game (checked first: no keys, no `.env`, no large files). coloring-books and player-score-keeper are empty folders, so no repo. Global git identity on the Mac is now `charvi-laxmii <149449900+charvi-laxmii@users.noreply.github.com>` (it was unset, so commits from earlier today show `charvipattila@Charvis-Mac-Mini.local`). Tailscale is in Open at Login; its own "Launch at login" checkbox errors without the Allow-in-the-Background toggle, which doesn't matter.
 - Once the user confirms nothing is missing, delete `~/Downloads/ext4.vhdx`, `~/recovery/ext4.img` (about 35 GB together) and `~/recovery/mac-clones/`.
 - lucky-planner needs a fresh login (new secret key); iCloud/Google calendar credentials should be checked.
 - Web push returned 403 BadJwtToken for both subscriptions: re-subscribe from Alerts on the phone. Still open from before: Gmail 535 on the report email, `desktop/` decision, fix `test_split.py`.
