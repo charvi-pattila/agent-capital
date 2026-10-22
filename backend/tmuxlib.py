@@ -106,10 +106,29 @@ def paste_into_session(session, message, delay=0.3, submit=True):
     subprocess.run([TMUX, "set-buffer", "-b", buf, "--", message])
     subprocess.run([TMUX, "paste-buffer", "-d", "-b", buf, "-t", session])
     if submit:
-        # Ink takes longer to absorb a long paste; an Enter that arrives before
-        # it's done is swallowed and the text sits unsent in the input box.
-        threading.Event().wait(max(delay, min(3.0, len(message) / 1500)))
-        subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+        threading.Event().wait(delay)
+        # After a large paste Claude Code shows "paste again to expand" and eats
+        # the first Enter, however long we wait. Press again while the message
+        # is still sitting in the input box.
+        for _ in range(3):
+            subprocess.run([TMUX, "send-keys", "-t", session, "", "Enter"])
+            threading.Event().wait(0.7)
+            if not _message_in_input_box(session, message):
+                break
+
+
+def _message_in_input_box(session, message):
+    """True while `message` is still unsent in Claude Code's input box (between
+    the last two ─── rules). Matches the message's own last line, or a collapsed
+    "[Pasted text" chip, rather than "box not empty": with colours stripped, the
+    grey prompt suggestion looks like typed text, and Enter would send it."""
+    lines = capture_session_pane(session).splitlines()
+    rules = [i for i, l in enumerate(lines) if l.strip() and set(l.strip()) <= {"─"}]
+    if len(rules) < 2:
+        return False
+    box = "\n".join(lines[rules[-2] + 1:rules[-1]])
+    tail = next((l.strip() for l in reversed(message.splitlines()) if l.strip()), "")[:30]
+    return "[Pasted text" in box or bool(tail and tail in box)
 
 
 # Claude Code's TUI is ready for input once it has painted its prompt box. The
