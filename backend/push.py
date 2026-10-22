@@ -51,7 +51,10 @@ VAPID_KEY_PATH = PUSH_DIR / "vapid_private.pem"
 PUSH_SUBS_PATH = PUSH_DIR / "subscriptions.json"
 PUSH_SETTINGS_PATH = PUSH_DIR / "settings.json"
 # VAPID "sub" claim — a contact address the push services may use about abuse.
-PUSH_CONTACT = os.environ.get("PUSH_CONTACT", "mailto:agent-capital@localhost")
+# Apple's push service rejects a "localhost" address with 403 BadJwtToken, and
+# py_vapid only accepts mailto:, so default to a real (GitHub no-reply) mailbox.
+# PUSH_CONTACT=mailto:… overrides it.
+PUSH_CONTACT = os.environ.get("PUSH_CONTACT", "mailto:149449900+charvi-laxmii@users.noreply.github.com")
 _push_lock = threading.Lock()
 _vapid = None
 

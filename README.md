@@ -78,7 +78,7 @@ Turning it on, per device:
 2. Tap **Alerts** (bottom bar on the phone, sidebar on desktop), type your name for the greeting, tap **Turn on** and allow notifications.
 3. **Send test** should show a notification within a few seconds. Tapping any alert opens that project.
 
-What triggers one: a chat reply finishing, a recognised CLI prompt (`(y/n)`, numbered menu, "press enter") sitting unanswered for ~20–30 s, or any session idle for 90 s. Each distinct terminal state alerts at most once, so a session left waiting doesn't nag. `NOTIFY_NAME=…` in `backend/.env` is a fallback for the greeting name; `PUSH_CONTACT=mailto:…` sets the VAPID contact address.
+What triggers one: a chat reply finishing, a recognised CLI prompt (`(y/n)`, numbered menu, "press enter") sitting unanswered for ~20–30 s, or any session idle for 90 s. Each distinct terminal state alerts at most once, so a session left waiting doesn't nag. `NOTIFY_NAME=…` in `backend/.env` is a fallback for the greeting name; `PUSH_CONTACT=mailto:…` sets the VAPID contact address (it must be a real domain: Apple rejects `localhost` with 403 BadJwtToken).
 
 ## Run on a Windows PC as an always-on server (WSL2 + systemd)
 
