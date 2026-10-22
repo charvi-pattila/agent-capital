@@ -8,7 +8,6 @@ from context import context_monitor, get_running_sessions
 from blocked import blocked_monitor
 from split import load_split, split_monitor
 from routes_projects import _close_all_sessions
-from tmuxlib import dev_server_keeper
 
 # Importing the route modules registers their @app.route handlers.
 import routes_agents, routes_data, routes_terminal, ptyws  # noqa: F401,E401
@@ -49,7 +48,6 @@ if __name__ == "__main__":
     threading.Thread(target=context_monitor, daemon=True).start()
     threading.Thread(target=blocked_monitor, daemon=True).start()
     threading.Thread(target=split_monitor, daemon=True).start()
-    threading.Thread(target=dev_server_keeper, daemon=True).start()
     _host = os.environ.get("HOST", "0.0.0.0")
     _port = int(os.environ.get("PORT", "8888"))
     _cert, _key = os.environ.get("SSL_CERT"), os.environ.get("SSL_KEY")
