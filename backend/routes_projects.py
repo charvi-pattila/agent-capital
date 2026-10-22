@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from flask import jsonify, request, Response, send_file
 from core import CLAUDE_BIN, PROJECTS_BASE_DIR, all_projects, app, init_project_dir, load_meta, project_dir, resolve_project_path, save_meta
-from tmuxlib import dev_server_running, kill_session, open_terminal_window, paste_into_session, session_name, session_running, start_dev_server, start_session, wait_for_claude_ready
+from tmuxlib import dev_server_running, kill_session, stop_dev_server, open_terminal_window, paste_into_session, session_name, session_running, start_dev_server, start_session, wait_for_claude_ready
 from messaging import _do_send_message, clear_unread, load_messages, wait_for_stable_reply
 from push import notify_needs_response
 from context import _save_session_summary, _trim_state, context_status, get_running_sessions, session_idle, trim_context
@@ -105,10 +105,15 @@ def update_project(pid):
     if not meta:
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
+    old_cmd = meta.get("server_cmd", "")
     for field in ("preview_url", "preview_file", "server_cmd", "description"):
         if field in data:
             meta[field] = data[field]
     save_meta(pid, meta)
+    if meta.get("server_cmd", "") != old_cmd:
+        # Restart the app under the new command (the keeper only starts missing ones).
+        stop_dev_server(pid)
+        start_dev_server(pid, meta.get("path"), meta.get("server_cmd"))
     return jsonify(meta)
 
 
@@ -148,6 +153,7 @@ def generate_description(pid):
 @app.route("/api/projects/<pid>", methods=["DELETE"])
 def delete_project(pid):
     kill_session(pid)
+    stop_dev_server(pid)
     import shutil
     shutil.rmtree(project_dir(pid), ignore_errors=True)
     return jsonify({"ok": True})

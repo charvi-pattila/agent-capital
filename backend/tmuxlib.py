@@ -5,7 +5,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from core import CLAUDE_BIN, IS_MACOS, TMUX
+from core import CLAUDE_BIN, IS_MACOS, TMUX, all_projects
 
 
 # ── tmux helpers ──────────────────────────────────────────────────────────────
@@ -45,6 +45,25 @@ def start_dev_server(pid, project_path, cmd):
     cwd = os.path.expanduser(project_path) if project_path else os.path.expanduser("~")
     subprocess.run([TMUX, "new-session", "-d", "-s", session, "-c", cwd, cmd])
     return True
+
+
+DEV_SERVER_CHECK_INTERVAL = 30
+
+
+def dev_server_keeper():
+    """Keep every project's app up whether or not its Claude session is running:
+    start them all when the backend boots, and restart any that exit. A project
+    opts out by having no server_cmd, or a path that doesn't exist here."""
+    while True:
+        try:
+            for p in all_projects():
+                path = os.path.expanduser(p.get("path") or "")
+                if (p.get("server_cmd") or "").strip() and os.path.isdir(path):
+                    if start_dev_server(p["id"], path, p["server_cmd"]):
+                        print(f"[dev-server-keeper] started {p.get('name', p['id'])}")
+        except Exception as e:
+            print(f"[dev-server-keeper] error: {e}")
+        threading.Event().wait(DEV_SERVER_CHECK_INTERVAL)
 
 
 def stop_dev_server(pid):
@@ -225,7 +244,8 @@ def close_terminal_window(pid):
 def kill_session(pid):
     if session_running(pid):
         subprocess.run([TMUX, "kill-session", "-t", session_name(pid)])
-    stop_dev_server(pid)
+    # The project's app (dev server) is left running on purpose: it is served
+    # over Tailscale and must stay up when the Claude session stops.
     close_terminal_window(pid)
     ready = Path(f"/tmp/phone_ready_{pid}")
     if ready.exists():
